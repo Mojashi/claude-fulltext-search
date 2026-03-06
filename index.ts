@@ -271,7 +271,17 @@ async function buildIndex(): Promise<string[]> {
 
 // --- preview ---
 
-async function previewMessage(projDirName: string, sessionId: string, msgIndex: number) {
+function highlightText(text: string, query?: string): string {
+  if (!query || !query.trim()) return text;
+  // Split fzf query into tokens, ignore operators like ! ^ $
+  const tokens = query.trim().split(/\s+/).filter(t => t && !t.startsWith("!"));
+  if (!tokens.length) return text;
+  const escaped = tokens.map(t => t.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"));
+  const re = new RegExp(`(${escaped.join("|")})`, "gi");
+  return text.replace(re, "\x1b[1;31m$1\x1b[0m");
+}
+
+async function previewMessage(projDirName: string, sessionId: string, msgIndex: number, highlight?: string) {
   const jsonlPath = join(CLAUDE_PROJECTS_DIR, projDirName, `${sessionId}.jsonl`);
   const lines = await readJsonlLines(jsonlPath);
   const messages = parseMessages(lines);
@@ -299,7 +309,8 @@ async function previewMessage(projDirName: string, sessionId: string, msgIndex: 
     const textLines = msg.text.split("\n");
     const maxLines = isCurrent ? 30 : 6;
     for (const tl of textLines.slice(0, maxLines)) {
-      out.push(`        ${tl.length > 120 ? tl.slice(0, 120) + "..." : tl}`);
+      const displayed = tl.length > 120 ? tl.slice(0, 120) + "..." : tl;
+      out.push(`        ${highlightText(displayed, highlight)}`);
     }
     if (textLines.length > maxLines) {
       out.push(`        ... (${textLines.length - maxLines} more lines)`);
@@ -353,7 +364,7 @@ function runFzf(entries: string[], query?: string): { sessionId: string; cwd: st
     return null;
   }
 
-  const previewCmd = `${process.execPath} ${SCRIPT_PATH} --preview {5}:{6}:{7}`;
+  const previewCmd = `${process.execPath} ${SCRIPT_PATH} --preview {5}:{6}:{7} --highlight {q}`;
 
   const fzfArgs = [
     "--ansi",
@@ -437,6 +448,7 @@ async function main() {
       "clear-cache": { type: "boolean" },
       update: { type: "boolean" },
       preview: { type: "string" },
+      highlight: { type: "string" },
       help: { type: "boolean", short: "h" },
     },
     allowPositionals: true,
@@ -460,7 +472,7 @@ Options:
     const parts = (values.preview as string).split(":");
     const [sessionId, msgIdx, ...rest] = parts;
     const projDirName = rest.join(":");
-    await previewMessage(projDirName, sessionId, parseInt(msgIdx));
+    await previewMessage(projDirName, sessionId, parseInt(msgIdx), values.highlight as string);
     return;
   }
 
