@@ -271,14 +271,49 @@ async function buildIndex(): Promise<string[]> {
 
 // --- preview ---
 
+function fuzzyHighlight(text: string, token: string): string {
+  // Highlight characters matched by fzf's fuzzy algorithm (in order)
+  const lower = text.toLowerCase();
+  const tLower = token.toLowerCase();
+  const HL = "\x1b[1;31m";
+  const RS = "\x1b[0m";
+  let ti = 0;
+  let result = "";
+  for (let i = 0; i < text.length && ti < tLower.length; i++) {
+    if (lower[i] === tLower[ti]) {
+      result += HL + text[i] + RS;
+      ti++;
+    } else {
+      result += text[i];
+    }
+  }
+  // Append remaining text if token was fully matched
+  if (ti === tLower.length) {
+    result += text.slice(result.replace(/\x1b\[[^m]*m/g, "").length);
+    return result;
+  }
+  // Token didn't fully match - return original
+  return text;
+}
+
 function highlightText(text: string, query?: string): string {
   if (!query || !query.trim()) return text;
-  // Split fzf query into tokens, ignore operators like ! ^ $
   const tokens = query.trim().split(/\s+/).filter(t => t && !t.startsWith("!"));
   if (!tokens.length) return text;
-  const escaped = tokens.map(t => t.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"));
-  const re = new RegExp(`(${escaped.join("|")})`, "gi");
-  return text.replace(re, "\x1b[1;31m$1\x1b[0m");
+
+  // Try exact substring first, then fuzzy
+  for (const token of tokens) {
+    const idx = text.toLowerCase().indexOf(token.toLowerCase());
+    if (idx !== -1) {
+      const before = text.slice(0, idx);
+      const match = text.slice(idx, idx + token.length);
+      const after = text.slice(idx + token.length);
+      text = before + "\x1b[1;31m" + match + "\x1b[0m" + after;
+    } else {
+      text = fuzzyHighlight(text, token);
+    }
+  }
+  return text;
 }
 
 async function previewMessage(projDirName: string, sessionId: string, msgIndex: number, highlight?: string) {
