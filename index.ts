@@ -275,7 +275,7 @@ function fuzzyHighlight(text: string, token: string): string {
   // Highlight characters matched by fzf's fuzzy algorithm (in order)
   const lower = text.toLowerCase();
   const tLower = token.toLowerCase();
-  const HL = "\x1b[1;31m";
+  const HL = "\x1b[30;43m";
   const RS = "\x1b[0m";
   let ti = 0;
   let result = "";
@@ -311,7 +311,7 @@ function highlightText(text: string, query?: string): string {
       const before = text.slice(0, idx);
       const match = text.slice(idx, idx + token.length);
       const after = text.slice(idx + token.length);
-      text = before + "\x1b[1;31m" + match + "\x1b[0m" + after;
+      text = before + "\x1b[30;43m" + match + "\x1b[0m" + after;
     } else {
       text = fuzzyHighlight(text, token);
     }
@@ -402,7 +402,7 @@ function runFzf(entries: string[], query?: string): { sessionId: string; cwd: st
     return null;
   }
 
-  const previewCmd = `${process.execPath} ${SCRIPT_PATH} --preview {5}:{6}:{7} --highlight {q}`;
+  const previewCmd = `${process.execPath} ${SCRIPT_PATH} --preview {5}:{6}:{7} --highlight "$FZF_QUERY"`;
 
   const fzfArgs = [
     "--ansi",
