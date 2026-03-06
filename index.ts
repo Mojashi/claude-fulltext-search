@@ -298,7 +298,10 @@ function fuzzyHighlight(text: string, token: string): string {
 
 function highlightText(text: string, query?: string): string {
   if (!query || !query.trim()) return text;
-  const tokens = query.trim().split(/\s+/).filter(t => t && !t.startsWith("!"));
+  const tokens = query.trim().split(/\s+/)
+    .filter(t => t && !t.startsWith("!"))
+    .map(t => t.replace(/^['^\.\$]+/g, "").replace(/\$$/g, ""))
+    .filter(Boolean);
   if (!tokens.length) return text;
 
   // Try exact substring first, then fuzzy
