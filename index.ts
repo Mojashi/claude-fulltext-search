@@ -1,14 +1,14 @@
-import { readdir, readFile, stat, mkdir, unlink } from "fs/promises";
+import { readdir, readFile, stat, mkdir, unlink, open } from "fs/promises";
 import { join, resolve, basename } from "path";
 import { homedir } from "os";
-import { existsSync, realpathSync } from "fs";
-import { createHash } from "crypto";
-import { spawnSync } from "child_process";
+import { existsSync, realpathSync, renameSync } from "fs";
+import { spawnSync, execSync } from "child_process";
 import { parseArgs } from "util";
 
 const CLAUDE_PROJECTS_DIR = join(homedir(), ".claude", "projects");
 const CACHE_DIR = join(homedir(), ".cache", "claude-search");
 const SCRIPT_PATH = process.argv[1];
+const REPO = "Mojashi/claude-fulltext-search";
 
 // --- helpers ---
 
@@ -102,90 +102,171 @@ async function readJsonlLines(path: string): Promise<string[]> {
   }
 }
 
-// --- cache ---
-
-async function getFingerprint(): Promise<string> {
-  const parts: string[] = [];
+async function readJsonlTail(path: string, offset: number): Promise<string[]> {
   try {
-    const projDirs = (await readdir(CLAUDE_PROJECTS_DIR, { withFileTypes: true }))
-      .filter((d) => d.isDirectory())
-      .sort((a, b) => a.name.localeCompare(b.name));
-    for (const projDir of projDirs) {
-      const projPath = join(CLAUDE_PROJECTS_DIR, projDir.name);
-      const files = (await readdir(projPath)).filter((f) => f.endsWith(".jsonl")).sort();
-      for (const f of files) {
-        const fp = join(projPath, f);
-        const st = await stat(fp);
-        parts.push(`${fp}:${st.mtimeMs}:${st.size}`);
-      }
-    }
-  } catch {}
-  return createHash("md5").update(parts.join("\n")).digest("hex");
-}
-
-interface CacheData {
-  fingerprint: string;
-  entries: string[];
-}
-
-async function loadCache(): Promise<CacheData | null> {
-  try {
-    const data = JSON.parse(await readFile(join(CACHE_DIR, "index.json"), "utf-8"));
-    return data as CacheData;
+    const fh = await open(path, "r");
+    const buf = Buffer.alloc((await fh.stat()).size - offset);
+    await fh.read(buf, 0, buf.length, offset);
+    await fh.close();
+    return buf.toString("utf-8").split("\n");
   } catch {
-    return null;
+    return [];
   }
 }
 
-async function saveCache(fingerprint: string, entries: string[]) {
+// --- cache (incremental, per-file with append support) ---
+
+interface FileCache {
+  size: number;
+  cwd: string | null;
+  msgCount: number; // total messages indexed so far
+  entries: string[];
+}
+
+interface CacheData {
+  version: 3;
+  files: Record<string, FileCache>; // key: "projDirName/sessionId"
+}
+
+async function loadCache(): Promise<CacheData> {
+  try {
+    const data = JSON.parse(await readFile(join(CACHE_DIR, "index.json"), "utf-8"));
+    if (data.version === 3) return data as CacheData;
+  } catch {}
+  return { version: 3, files: {} };
+}
+
+async function saveCache(cache: CacheData) {
   await mkdir(CACHE_DIR, { recursive: true });
-  await Bun.write(join(CACHE_DIR, "index.json"), JSON.stringify({ fingerprint, entries }));
+  await Bun.write(join(CACHE_DIR, "index.json"), JSON.stringify(cache));
+}
+
+function makeEntries(messages: Message[], startIdx: number, sessionId: string, projDirName: string, projDisplay: string): string[] {
+  const shortProj = shortenPath(projDisplay);
+  const entries: string[] = [];
+  for (let i = 0; i < messages.length; i++) {
+    const msg = messages[i];
+    const ts = formatTimestamp(msg.timestamp);
+    let firstLine = msg.text.replace(/\n/g, " ").trim();
+    if (firstLine.length > 200) firstLine = firstLine.slice(0, 200) + "...";
+    entries.push(`${shortProj}\t${msg.role}\t${ts}\t${firstLine}\t${sessionId}\t${startIdx + i}\t${projDirName}\t${projDisplay}`);
+  }
+  return entries;
 }
 
 // --- index ---
 
+async function processFile(
+  filePath: string,
+  sessionId: string,
+  projDirName: string,
+  fileSize: number,
+  cached: FileCache | undefined,
+): Promise<FileCache> {
+  // Exact match - no changes
+  if (cached && cached.size === fileSize) {
+    return cached;
+  }
+
+  // File grew - read only the appended portion
+  if (cached && cached.size < fileSize) {
+    const tailLines = await readJsonlTail(filePath, cached.size);
+    const projDisplay = cached.cwd || projDirName;
+    const newMessages = parseMessages(tailLines);
+    const newEntries = makeEntries(newMessages, cached.msgCount, sessionId, projDirName, projDisplay);
+    return {
+      size: fileSize,
+      cwd: cached.cwd,
+      msgCount: cached.msgCount + newMessages.length,
+      entries: [...cached.entries, ...newEntries],
+    };
+  }
+
+  // New file or file shrunk (shouldn't happen but handle it) - full reindex
+  const lines = await readJsonlLines(filePath);
+  const cwd = getProjectCwd(lines);
+  const projDisplay = cwd || projDirName;
+  const messages = parseMessages(lines);
+  const entries = makeEntries(messages, 0, sessionId, projDirName, projDisplay);
+  return { size: fileSize, cwd, msgCount: messages.length, entries };
+}
+
 async function buildIndex(): Promise<string[]> {
   if (!existsSync(CLAUDE_PROJECTS_DIR)) return [];
 
-  const fp = await getFingerprint();
-  const cached = await loadCache();
-  if (cached && cached.fingerprint === fp) {
-    process.stderr.write("(cached) ");
-    return cached.entries;
-  }
+  const cache = await loadCache();
+  const newFiles: Record<string, FileCache> = {};
+  const allEntries: string[] = [];
+  let hits = 0;
+  let appends = 0;
+  let full = 0;
 
-  const entries: string[] = [];
   const projDirs = (await readdir(CLAUDE_PROJECTS_DIR, { withFileTypes: true }))
     .filter((d) => d.isDirectory())
     .sort((a, b) => a.name.localeCompare(b.name));
 
+  // Collect all files
+  const allFiles: { key: string; filePath: string; sessionId: string; projDirName: string }[] = [];
   for (const projDir of projDirs) {
     const projPath = join(CLAUDE_PROJECTS_DIR, projDir.name);
     const files = (await readdir(projPath)).filter((f) => f.endsWith(".jsonl")).sort();
-
     for (const f of files) {
       const sessionId = basename(f, ".jsonl");
-      const filePath = join(projPath, f);
-      const lines = await readJsonlLines(filePath);
-      const cwd = getProjectCwd(lines);
-      const projDisplay = cwd || projDir.name;
-      const messages = parseMessages(lines);
+      allFiles.push({ key: `${projDir.name}/${sessionId}`, filePath: join(projPath, f), sessionId, projDirName: projDir.name });
+    }
+  }
 
-      for (let i = 0; i < messages.length; i++) {
-        const msg = messages[i];
-        const ts = formatTimestamp(msg.timestamp);
-        let firstLine = msg.text.replace(/\n/g, " ").trim();
-        if (firstLine.length > 200) firstLine = firstLine.slice(0, 200) + "...";
+  // Stat all files in parallel
+  const stats = await Promise.all(allFiles.map((f) => stat(f.filePath)));
 
-        const shortProj = shortenPath(projDisplay);
-        // {1}project  {2}role  {3}timestamp  {4}text  {5}session_id  {6}msg_index  {7}proj_dir_name  {8}full_cwd
-        entries.push(`${shortProj}\t${msg.role}\t${ts}\t${firstLine}\t${sessionId}\t${i}\t${projDir.name}\t${projDisplay}`);
+  // Separate: exact hits vs needs processing
+  const toProcess: { file: typeof allFiles[0]; size: number; cached?: FileCache }[] = [];
+  for (let i = 0; i < allFiles.length; i++) {
+    const f = allFiles[i];
+    const size = stats[i].size;
+    const cached = cache.files[f.key];
+
+    if (cached && cached.size === size) {
+      newFiles[f.key] = cached;
+      allEntries.push(...cached.entries);
+      hits++;
+    } else {
+      toProcess.push({ file: f, size, cached });
+    }
+  }
+
+  // Process changes in parallel batches
+  if (toProcess.length > 0) {
+    const BATCH = 50;
+    for (let i = 0; i < toProcess.length; i += BATCH) {
+      const batch = toProcess.slice(i, i + BATCH);
+      const results = await Promise.all(
+        batch.map(({ file, size, cached }) =>
+          processFile(file.filePath, file.sessionId, file.projDirName, size, cached).then((fc) => ({ key: file.key, fc, wasAppend: !!(cached && cached.size < size) }))
+        )
+      );
+      for (const { key, fc, wasAppend } of results) {
+        newFiles[key] = fc;
+        allEntries.push(...fc.entries);
+        if (wasAppend) appends++;
+        else full++;
       }
     }
   }
 
-  await saveCache(fp, entries);
-  return entries;
+  const changed = appends + full;
+  if (changed > 0) {
+    const parts = [];
+    if (full > 0) parts.push(`${full} new`);
+    if (appends > 0) parts.push(`${appends} appended`);
+    if (hits > 0) parts.push(`${hits} cached`);
+    process.stderr.write(`(${parts.join(", ")}) `);
+    await saveCache({ version: 3, files: newFiles });
+  } else {
+    process.stderr.write("(cached) ");
+  }
+
+  return allEntries;
 }
 
 // --- preview ---
@@ -302,6 +383,48 @@ function runFzf(entries: string[], query?: string): { sessionId: string; cwd: st
   return null;
 }
 
+// --- update ---
+
+async function selfUpdate() {
+  const platform = process.platform === "darwin" ? "darwin" : "linux";
+  const arch = process.arch === "arm64" ? "arm64" : "x64";
+  const assetName = `claude-search-${platform}-${arch}`;
+
+  console.log("Checking for updates...");
+
+  const res = await fetch(`https://api.github.com/repos/${REPO}/releases/latest`);
+  if (!res.ok) {
+    console.error(`Failed to check for updates: ${res.status} ${res.statusText}`);
+    process.exit(1);
+  }
+  const release = await res.json() as any;
+  const tag = release.tag_name;
+
+  const asset = release.assets?.find((a: any) => a.name === assetName);
+  if (!asset) {
+    console.error(`No binary found for ${assetName} in release ${tag}`);
+    console.error("Available:", release.assets?.map((a: any) => a.name).join(", "));
+    process.exit(1);
+  }
+
+  console.log(`Downloading ${tag} (${assetName})...`);
+
+  const binRes = await fetch(asset.browser_download_url);
+  if (!binRes.ok) {
+    console.error(`Failed to download: ${binRes.status}`);
+    process.exit(1);
+  }
+
+  const binPath = process.execPath;
+  const tmpPath = binPath + ".tmp";
+
+  await Bun.write(tmpPath, binRes);
+  execSync(`chmod +x "${tmpPath}"`);
+  renameSync(tmpPath, binPath);
+
+  console.log(`Updated to ${tag}`);
+}
+
 // --- main ---
 
 async function main() {
@@ -312,6 +435,7 @@ async function main() {
       role: { type: "string", short: "r" },
       "list-projects": { type: "boolean" },
       "clear-cache": { type: "boolean" },
+      update: { type: "boolean" },
       preview: { type: "string" },
       help: { type: "boolean", short: "h" },
     },
@@ -327,6 +451,7 @@ Options:
   -r, --role <role>      Filter by role (user|assistant)
   --list-projects        List all projects
   --clear-cache          Clear the index cache
+  --update               Self-update to the latest release
   -h, --help             Show this help`);
     return;
   }
@@ -347,6 +472,11 @@ Options:
     } else {
       console.log("No cache to clear.");
     }
+    return;
+  }
+
+  if (values.update) {
+    await selfUpdate();
     return;
   }
 
