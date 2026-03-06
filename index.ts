@@ -375,6 +375,7 @@ function runFzf(entries: string[], query?: string): { sessionId: string; cwd: st
     "--header", "Enter: resume session | Ctrl-C: quit",
     "--no-sort",
     "--tac",
+    "--bind", "change:refresh-preview",
   ];
 
   if (query) fzfArgs.push("--query", query);
