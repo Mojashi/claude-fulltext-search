@@ -147,7 +147,7 @@ function makeEntries(messages: Message[], startIdx: number, sessionId: string, p
   for (let i = 0; i < messages.length; i++) {
     const msg = messages[i];
     const ts = formatTimestamp(msg.timestamp);
-    let firstLine = msg.text.replace(/\n/g, " ").trim();
+    let firstLine = msg.text.replace(/[\n\t]/g, " ").trim();
     if (firstLine.length > 200) firstLine = firstLine.slice(0, 200) + "...";
     entries.push(`${shortProj}\t${msg.role}\t${ts}\t${firstLine}\t${sessionId}\t${startIdx + i}\t${projDirName}\t${projDisplay}`);
   }
