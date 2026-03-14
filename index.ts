@@ -5,6 +5,7 @@ import { existsSync, realpathSync, renameSync } from "fs";
 import { spawnSync, execSync } from "child_process";
 import { parseArgs } from "util";
 
+const VERSION = "0.3.0";
 const CLAUDE_PROJECTS_DIR = join(homedir(), ".claude", "projects");
 const CACHE_DIR = join(homedir(), ".cache", "claude-search");
 const SCRIPT_PATH = process.argv[1];
@@ -486,6 +487,7 @@ async function main() {
       "list-projects": { type: "boolean" },
       "clear-cache": { type: "boolean" },
       update: { type: "boolean" },
+      version: { type: "boolean", short: "v" },
       preview: { type: "string" },
       highlight: { type: "string" },
       help: { type: "boolean", short: "h" },
@@ -493,6 +495,11 @@ async function main() {
     allowPositionals: true,
     strict: false,
   });
+
+  if (values.version) {
+    console.log(`claude-search v${VERSION}`);
+    return;
+  }
 
   if (values.help) {
     console.log(`Usage: claude-search [query] [options]
@@ -503,6 +510,7 @@ Options:
   --list-projects        List all projects
   --clear-cache          Clear the index cache
   --update               Self-update to the latest release
+  -v, --version          Show version
   -h, --help             Show this help`);
     return;
   }
