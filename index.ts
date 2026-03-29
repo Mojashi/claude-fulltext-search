@@ -473,7 +473,65 @@ function filterEntries(entries: string[], project?: string, role?: string): stri
 
 // --- fzf ---
 
-function runFzf(entries: string[], query?: string): { sessionId: string; cwd: string } | null {
+function findFzf(): string | null {
+  // Check PATH first
+  try {
+    const which = spawnSync("which", ["fzf"], { encoding: "utf-8" });
+    if (which.status === 0 && which.stdout.trim()) return which.stdout.trim();
+  } catch {}
+  // Check local cache
+  const cached = join(CACHE_DIR, "fzf");
+  if (existsSync(cached)) return cached;
+  return null;
+}
+
+async function installFzf(): Promise<string> {
+  const platform = process.platform === "darwin" ? "darwin" : "linux";
+  const arch = process.arch === "arm64" ? "arm64" : "amd64";
+  const assetName = `fzf-{VERSION}-${platform}_${arch}.tar.gz`;
+
+  process.stderr.write("fzf not found. Downloading...\n");
+
+  const res = await fetch("https://api.github.com/repos/junegunn/fzf/releases/latest");
+  if (!res.ok) {
+    console.error(`Failed to fetch fzf release: ${res.status}`);
+    process.exit(1);
+  }
+  const release = await res.json() as any;
+  const version = (release.tag_name as string).replace(/^v/, "");
+  const name = assetName.replace("{VERSION}", version);
+  const asset = release.assets?.find((a: any) => a.name === name);
+  if (!asset) {
+    console.error(`No fzf binary found for ${name}`);
+    console.error("Install fzf manually: https://github.com/junegunn/fzf#installation");
+    process.exit(1);
+  }
+
+  const dlRes = await fetch(asset.browser_download_url);
+  if (!dlRes.ok) {
+    console.error(`Failed to download fzf: ${dlRes.status}`);
+    process.exit(1);
+  }
+
+  await mkdir(CACHE_DIR, { recursive: true });
+  const tarPath = join(CACHE_DIR, "fzf.tar.gz");
+  await Bun.write(tarPath, dlRes);
+  execSync(`tar -xzf "${tarPath}" -C "${CACHE_DIR}" fzf`);
+  await unlink(tarPath);
+  const fzfPath = join(CACHE_DIR, "fzf");
+  execSync(`chmod +x "${fzfPath}"`);
+
+  process.stderr.write(`fzf ${version} installed to ${fzfPath}\n`);
+  return fzfPath;
+}
+
+async function ensureFzf(): Promise<string> {
+  const found = findFzf();
+  if (found) return found;
+  return await installFzf();
+}
+
+function runFzf(fzfPath: string, entries: string[], query?: string): { sessionId: string; cwd: string } | null {
   if (!entries.length) {
     console.error("No conversations found.");
     return null;
@@ -496,7 +554,7 @@ function runFzf(entries: string[], query?: string): { sessionId: string; cwd: st
 
   if (query) fzfArgs.push("--query", query);
 
-  const result = spawnSync("fzf", fzfArgs, {
+  const result = spawnSync(fzfPath, fzfArgs, {
     input: entries.join("\n"),
     stdio: ["pipe", "pipe", "inherit"],
     encoding: "utf-8",
@@ -669,7 +727,7 @@ Options:
     return;
   }
 
-  const config = await ensureConfig();
+  const [config, fzfPath] = await Promise.all([ensureConfig(), ensureFzf()]);
 
   const query = positionals[0];
   const role = values.role as string | undefined;
@@ -687,7 +745,7 @@ Options:
   const suffix = entries.length !== total ? ` (filtered from ${total})` : "";
   process.stderr.write(`${entries.length} messages${suffix}\n`);
 
-  const selected = runFzf(entries, query);
+  const selected = runFzf(fzfPath, entries, query);
 
   if (selected) {
     if (selected.cwd && existsSync(selected.cwd)) {
