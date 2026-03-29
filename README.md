@@ -2,40 +2,30 @@
 
 Full-text search for [Claude Code](https://claude.ai/claude-code) chat history with fzf-powered TUI.
 
+![screenshot](screenshot.svg)
+
 ## Features
 
 - Full-text search across all Claude Code conversations (including tool use / tool results)
 - fzf-powered interactive fuzzy finder with conversation preview (with query highlighting)
+- Preview shows latest messages in the session at a glance
 - Filter by project path or message role
 - Resume sessions directly from search results (auto `cd` to the correct directory)
+- Configurable exec command on selection (`--setup`)
 - Incremental index caching for fast repeated searches
+- Auto-downloads fzf if not installed
 - Self-update from GitHub releases
-
-## Requirements
-
-- [fzf](https://github.com/junegunn/fzf)
 
 ## Install
 
-### Download binary (recommended)
+```sh
+curl -fsSL https://raw.githubusercontent.com/Mojashi/claude-fulltext-search/main/install.sh | sh
+```
 
-Download the latest binary for your platform from [Releases](https://github.com/Mojashi/claude-fulltext-search/releases) and put it in your PATH:
+Or specify a custom install directory:
 
-```bash
-# macOS (Apple Silicon)
-curl -Lo claude-search https://github.com/Mojashi/claude-fulltext-search/releases/latest/download/claude-search-darwin-arm64
-
-# macOS (Intel)
-curl -Lo claude-search https://github.com/Mojashi/claude-fulltext-search/releases/latest/download/claude-search-darwin-x64
-
-# Linux (x64)
-curl -Lo claude-search https://github.com/Mojashi/claude-fulltext-search/releases/latest/download/claude-search-linux-x64
-
-# Linux (ARM64)
-curl -Lo claude-search https://github.com/Mojashi/claude-fulltext-search/releases/latest/download/claude-search-linux-arm64
-
-chmod +x claude-search
-mv claude-search ~/.local/bin/  # or /usr/local/bin/
+```sh
+INSTALL_DIR=~/.local/bin curl -fsSL https://raw.githubusercontent.com/Mojashi/claude-fulltext-search/main/install.sh | sh
 ```
 
 ### Build from source
@@ -72,8 +62,14 @@ claude-search -p ~/repos/my-project
 claude-search -r user
 claude-search -r assistant
 
+# Custom command on selection
+claude-search -e 'echo {sessionId}'
+
 # List all projects
 claude-search --list-projects
+
+# Configure settings (exec template, etc.)
+claude-search --setup
 
 # Clear index cache
 claude-search --clear-cache
@@ -94,7 +90,7 @@ Claude Code stores conversation history as JSONL files in `~/.claude/projects/`.
 1. Indexes all messages (text, tool use inputs, tool results) from every session
 2. Caches the index incrementally — only re-reads files that changed or grew
 3. Pipes the index to fzf for interactive filtering with a conversation preview panel
-4. On selection, `cd`s to the original project directory and runs `claude --resume <session-id>`
+4. On selection, `cd`s to the original project directory and runs the configured command (default: `claude --resume <session-id>`)
 
 ## License
 
