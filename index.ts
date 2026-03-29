@@ -6,7 +6,7 @@ import { spawnSync, execSync } from "child_process";
 import { parseArgs } from "util";
 import * as readline from "readline";
 
-const VERSION = "0.3.0";
+const VERSION = "0.4.0";
 const CLAUDE_PROJECTS_DIR = join(homedir(), ".claude", "projects");
 const CACHE_DIR = join(homedir(), ".cache", "claude-search");
 const CONFIG_DIR = join(homedir(), ".config", "claude-search");
