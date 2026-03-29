@@ -1,0 +1,144 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1040" height="660" viewBox="0 0 1040 660">
+  <defs>
+    <style>
+      @import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;700&amp;display=swap');
+      .term { font-family: 'JetBrains Mono', 'SF Mono', 'Monaco', 'Menlo', monospace; font-size: 12px; }
+      .dim { fill: #6b7280; }
+      .cyan { fill: #22d3ee; font-weight: bold; }
+      .green { fill: #4ade80; }
+      .yellow { fill: #facc15; }
+      .red { fill: #f87171; font-weight: bold; }
+      .white { fill: #e5e7eb; }
+      .bright { fill: #f9fafb; }
+      .hl { fill: #facc15; font-weight: bold; }
+      .separator { stroke: #374151; stroke-width: 1; }
+    </style>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#e0e7ff"/>
+      <stop offset="50%" stop-color="#f0e6ff"/>
+      <stop offset="100%" stop-color="#ffe0f0"/>
+    </linearGradient>
+    <filter id="shadow" x="-5%" y="-5%" width="115%" height="115%">
+      <feDropShadow dx="0" dy="8" stdDeviation="16" flood-color="#000" flood-opacity="0.35"/>
+    </filter>
+  </defs>
+
+  <!-- Background gradient -->
+  <rect width="1040" height="660" rx="0" fill="url(#bg)"/>
+
+  <!-- Window with shadow -->
+  <g filter="url(#shadow)">
+    <rect x="40" y="40" width="960" height="580" rx="10" fill="#1a1a2e"/>
+  </g>
+
+  <!-- Title bar -->
+  <rect x="40" y="40" width="960" height="36" rx="10" fill="#16162a"/>
+  <rect x="40" y="66" width="960" height="10" fill="#16162a"/>
+  <!-- Traffic lights -->
+  <circle cx="60" cy="58" r="6" fill="#ff5f57"/>
+  <circle cx="80" cy="58" r="6" fill="#febc2e"/>
+  <circle cx="100" cy="58" r="6" fill="#28c840"/>
+  <text x="520" y="62" text-anchor="middle" class="term dim" font-size="12">claude-search</text>
+
+  <!-- Prompt line -->
+  <text x="56" y="98" class="term green">&#x276F;</text>
+  <text x="70" y="98" class="term bright">claude-search</text>
+  <text x="182" y="98" class="term yellow">deploy</text>
+
+  <!-- Status line -->
+  <text x="56" y="116" class="term dim">Indexing... (cached) 132,858 messages</text>
+
+  <!-- fzf header -->
+  <text x="56" y="136" class="term dim">  Enter: resume session | Ctrl-C: quit</text>
+
+  <!-- Separator between left and right panes -->
+  <line x1="420" y1="144" x2="420" y2="610" class="separator"/>
+
+  <!-- Search input -->
+  <text x="56" y="156" class="term green">&#x276F;</text>
+  <text x="70" y="156" class="term bright">deploy</text>
+  <rect x="108" y="146" width="8" height="14" fill="#22d3ee" opacity="0.7"/>
+  <text x="350" y="156" class="term dim">  18/132,858</text>
+
+  <!-- LEFT PANE - Search results -->
+  <!-- Selected (highlighted) row -->
+  <rect x="42" y="162" width="376" height="18" fill="#1e3a5f" rx="2"/>
+  <text x="56" y="176" class="term cyan">repos/infra</text>
+  <text x="160" y="176" class="term bright">本番環境に<tspan class="hl">deploy</tspan>する手順を...</text>
+
+  <text x="56" y="194" class="term cyan">repos/infra</text>
+  <text x="160" y="194" class="term white">ECSの<tspan class="hl">deploy</tspan>mentが失敗して...</text>
+
+  <text x="56" y="212" class="term cyan">repos/api</text>
+  <text x="160" y="212" class="term white">staging <tspan class="hl">deploy</tspan> で 502 が出...</text>
+
+  <text x="56" y="230" class="term cyan">repos/front</text>
+  <text x="160" y="230" class="term white">Vercelの<tspan class="hl">deploy</tspan>設定を変更し...</text>
+
+  <text x="56" y="248" class="term cyan">repos/hoshu</text>
+  <text x="160" y="248" class="term white">CI/CDに自動<tspan class="hl">deploy</tspan>を追加し...</text>
+
+  <text x="56" y="266" class="term cyan">repos/api</text>
+  <text x="160" y="266" class="term white"><tspan class="hl">deploy</tspan>後のヘルスチェックが...</text>
+
+  <text x="56" y="284" class="term cyan">repos/infra</text>
+  <text x="160" y="284" class="term white">Blue-Green <tspan class="hl">deploy</tspan>mentの設...</text>
+
+  <text x="56" y="302" class="term cyan">repos/mobile</text>
+  <text x="160" y="302" class="term white">Firebase App Dist. で<tspan class="hl">deploy</tspan></text>
+
+  <text x="56" y="320" class="term cyan">repos/front</text>
+  <text x="160" y="320" class="term white">preview <tspan class="hl">deploy</tspan>のURLが発行...</text>
+
+  <text x="56" y="338" class="term cyan">repos/infra</text>
+  <text x="160" y="338" class="term white">Terraform後に自動<tspan class="hl">deploy</tspan>す...</text>
+
+  <text x="56" y="356" class="term cyan">repos/api</text>
+  <text x="160" y="356" class="term white">canary <tspan class="hl">deploy</tspan> で新バージョ...</text>
+
+  <text x="56" y="374" class="term cyan">repos/hoshu</text>
+  <text x="160" y="374" class="term white">GH Actionsの<tspan class="hl">deploy</tspan>修正</text>
+
+  <!-- RIGHT PANE - Preview -->
+  <text x="436" y="176" class="term cyan" font-weight="bold">/Users/mojashi/repos/infra</text>
+  <text x="436" y="194" class="term dim">session: a1b2c3d4-e5f6-7890-abcd-ef1234567890</text>
+  <text x="436" y="212" class="term dim">resume:  claude --resume a1b2c3d4-e5f6-7890-abcd-ef1234567890</text>
+
+  <!-- Context messages in preview -->
+  <text x="456" y="244" class="term green">     user</text>
+  <text x="540" y="244" class="term dim">2026-03-28 14:32</text>
+  <text x="472" y="260" class="term white">ECSのタスク定義を更新してほしい。CPUとメモリの割り当てを増やして</text>
+
+  <text x="456" y="284" class="term yellow">assistant</text>
+  <text x="540" y="284" class="term dim">2026-03-28 14:33</text>
+  <text x="472" y="300" class="term white">タスク定義を確認しました。現在の設定ではCPU 256, Memory 512に</text>
+  <text x="472" y="316" class="term white">なっています。本番の負荷を考慮するとCPU 512, Memory 1024への</text>
+  <text x="472" y="332" class="term white">引き上げを推奨します。task-definition.jsonを更新します。</text>
+  <text x="472" y="348" class="term dim">... (12 more lines)</text>
+
+  <!-- Current message marker -->
+  <text x="436" y="372" class="term red">&gt;&gt;&gt;</text>
+  <text x="460" y="372" class="term green">     user</text>
+  <text x="540" y="372" class="term dim">2026-03-28 15:10</text>
+  <text x="472" y="388" class="term bright">本番環境にdeployする手順を教えて。Terraformとecspressoどっち？</text>
+
+  <text x="456" y="412" class="term yellow">assistant</text>
+  <text x="540" y="412" class="term dim">2026-03-28 15:11</text>
+  <text x="472" y="428" class="term white">このリポジトリではecspressoを使っています。手順をまとめます：</text>
+  <text x="472" y="444" class="term white">1. mainブランチの最新をpull</text>
+  <text x="472" y="460" class="term white">2. ecspresso diff で差分確認</text>
+  <text x="472" y="476" class="term white">3. ecspresso deploy --rollback-events DEPLOYMENT_FAILURE</text>
+  <text x="472" y="492" class="term dim">... (8 more lines)</text>
+
+  <!-- Latest messages section -->
+  <text x="436" y="520" class="term dim">&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;</text>
+  <text x="436" y="538" class="term dim">  ... 4 messages omitted ...</text>
+  <text x="436" y="556" class="term dim">  &#x2193; latest in session (12 messages total)</text>
+
+  <text x="456" y="580" class="term green">     user</text>
+  <text x="540" y="580" class="term dim">2026-03-28 16:45</text>
+  <text x="472" y="596" class="term white">ロールバック手順も教えて。前回のデプロイに戻したい</text>
+
+  <text x="456" y="614" class="term yellow">assistant</text>
+  <text x="540" y="614" class="term dim">2026-03-28 16:46</text>
+</svg>
