@@ -1,15 +1,63 @@
-import { readdir, readFile, stat, mkdir, unlink, open } from "fs/promises";
+import { readdir, readFile, stat, mkdir, unlink, open, writeFile } from "fs/promises";
 import { join, resolve, basename } from "path";
 import { homedir } from "os";
-import { existsSync, realpathSync, renameSync } from "fs";
+import { existsSync, realpathSync, renameSync, readFileSync } from "fs";
 import { spawnSync, execSync } from "child_process";
 import { parseArgs } from "util";
+import * as readline from "readline";
 
 const VERSION = "0.3.0";
 const CLAUDE_PROJECTS_DIR = join(homedir(), ".claude", "projects");
 const CACHE_DIR = join(homedir(), ".cache", "claude-search");
+const CONFIG_DIR = join(homedir(), ".config", "claude-search");
+const CONFIG_PATH = join(CONFIG_DIR, "config.json");
 const SCRIPT_PATH = process.argv[1];
 const REPO = "Mojashi/claude-fulltext-search";
+
+interface Config {
+  exec?: string;
+}
+
+function loadConfig(): Config {
+  try {
+    return JSON.parse(readFileSync(CONFIG_PATH, "utf-8"));
+  } catch {
+    return {};
+  }
+}
+
+async function saveConfig(config: Config) {
+  await mkdir(CONFIG_DIR, { recursive: true });
+  await writeFile(CONFIG_PATH, JSON.stringify(config, null, 2) + "\n");
+}
+
+function prompt(question: string): Promise<string> {
+  const rl = readline.createInterface({ input: process.stdin, output: process.stderr });
+  return new Promise((resolve) => {
+    rl.question(question, (answer) => {
+      rl.close();
+      resolve(answer);
+    });
+  });
+}
+
+async function ensureConfig(): Promise<Config> {
+  if (existsSync(CONFIG_PATH)) return loadConfig();
+
+  process.stderr.write("\n=== claude-search: initial setup ===\n\n");
+  process.stderr.write("Command to run when a session is selected.\n");
+  process.stderr.write("Placeholders: {sessionId}, {cwd}, {project}\n");
+  process.stderr.write(`Default: claude --resume {sessionId}\n\n`);
+
+  const answer = await prompt("exec template (Enter for default): ");
+  const config: Config = {};
+  if (answer.trim()) {
+    config.exec = answer.trim();
+  }
+  await saveConfig(config);
+  process.stderr.write(`Config saved to ${CONFIG_PATH} (change later with --setup)\n\n`);
+  return config;
+}
 
 // --- helpers ---
 
@@ -150,7 +198,8 @@ function makeEntries(messages: Message[], startIdx: number, sessionId: string, p
     const ts = formatTimestamp(msg.timestamp);
     let firstLine = msg.text.replace(/[\n\t]/g, " ").trim();
     if (firstLine.length > 200) firstLine = firstLine.slice(0, 200) + "...";
-    entries.push(`${shortProj}\t${msg.role}\t${ts}\t${firstLine}\t${sessionId}\t${startIdx + i}\t${projDirName}\t${projDisplay}`);
+    const R = "\x1b[0m";
+    entries.push(`\x1b[1;36m${shortProj}${R}\t${firstLine}\t${msg.role}\t${ts}\t${sessionId}\t${startIdx + i}\t${projDirName}\t${projDisplay}`);
   }
   return entries;
 }
@@ -357,6 +406,33 @@ async function previewMessage(projDirName: string, sessionId: string, msgIndex: 
     out.push("");
   }
 
+  // Show latest messages if context window doesn't reach the end
+  const latestCount = 3;
+  const latestStart = Math.max(end, messages.length - latestCount);
+  if (latestStart < messages.length && end < messages.length) {
+    out.push(`\x1b[2m${"─".repeat(40)}\x1b[0m`);
+    if (latestStart > end) {
+      out.push(`\x1b[2m  ... ${latestStart - end} messages omitted ...\x1b[0m`);
+    }
+    out.push(`\x1b[2m  ↓ latest in session (${messages.length} messages total)\x1b[0m`);
+    out.push("");
+    for (let i = latestStart; i < messages.length; i++) {
+      const msg = messages[i];
+      const ts = formatTimestamp(msg.timestamp);
+      const roleColor = msg.role === "user" ? "\x1b[32m" : "\x1b[33m";
+      out.push(`    ${roleColor}${msg.role.padStart(9)}\x1b[0m \x1b[2m${ts}\x1b[0m`);
+      const textLines = msg.text.split("\n");
+      for (const tl of textLines.slice(0, 4)) {
+        const displayed = tl.length > 120 ? tl.slice(0, 120) + "..." : tl;
+        out.push(`        ${displayed}`);
+      }
+      if (textLines.length > 4) {
+        out.push(`        \x1b[2m... (${textLines.length - 4} more lines)\x1b[0m`);
+      }
+      out.push("");
+    }
+  }
+
   console.log(out.join("\n"));
 }
 
@@ -390,7 +466,7 @@ function filterEntries(entries: string[], project?: string, role?: string): stri
     }
   }
   if (role) {
-    entries = entries.filter((e) => e.split("\t")[1] === role);
+    entries = entries.filter((e) => e.split("\t")[2] === role);
   }
   return entries;
 }
@@ -408,10 +484,11 @@ function runFzf(entries: string[], query?: string): { sessionId: string; cwd: st
   const fzfArgs = [
     "--ansi",
     "--delimiter", "\t",
-    "--with-nth", "1..4",
+    "--with-nth", "1..2",
     "--preview", previewCmd,
     "--preview-window", "right:60%:wrap",
     "--header", "Enter: resume session | Ctrl-C: quit",
+    "--no-hscroll",
     "--no-sort",
     "--tac",
     "--bind", "change:refresh-preview",
@@ -485,9 +562,11 @@ async function main() {
       project: { type: "string", short: "p" },
       role: { type: "string", short: "r" },
       "list-projects": { type: "boolean" },
+      setup: { type: "boolean" },
       "clear-cache": { type: "boolean" },
       update: { type: "boolean" },
       version: { type: "boolean", short: "v" },
+      exec: { type: "string", short: "e" },
       preview: { type: "string" },
       highlight: { type: "string" },
       help: { type: "boolean", short: "h" },
@@ -507,11 +586,38 @@ async function main() {
 Options:
   -p, --project <path>   Filter by project path (exact if exists, otherwise substring)
   -r, --role <role>      Filter by role (user|assistant)
+  -e, --exec <template>  Command to run on selection (default: claude --resume {sessionId})
+                         Placeholders: {sessionId}, {cwd}, {project}
   --list-projects        List all projects
+  --setup                Configure settings interactively
   --clear-cache          Clear the index cache
   --update               Self-update to the latest release
   -v, --version          Show version
   -h, --help             Show this help`);
+    return;
+  }
+
+  if (values.setup) {
+    const config = loadConfig();
+    process.stderr.write(`\n=== claude-search: setup ===\n`);
+    process.stderr.write(`Config: ${CONFIG_PATH}\n\n`);
+
+    process.stderr.write(`Command to run when a session is selected.\n`);
+    process.stderr.write(`Placeholders: {sessionId}, {cwd}, {project}\n`);
+    process.stderr.write(`Current: ${config.exec || "(default) claude --resume {sessionId}"}\n\n`);
+
+    const answer = await prompt("exec template (Enter to keep, 'reset' for default): ");
+    if (answer.trim().toLowerCase() === "reset") {
+      delete config.exec;
+      await saveConfig(config);
+      console.log("Reset to default.");
+    } else if (answer.trim()) {
+      config.exec = answer.trim();
+      await saveConfig(config);
+      console.log(`Set to: ${config.exec}`);
+    } else {
+      console.log("No changes.");
+    }
     return;
   }
 
@@ -563,6 +669,8 @@ Options:
     return;
   }
 
+  const config = await ensureConfig();
+
   const query = positionals[0];
   const role = values.role as string | undefined;
   if (role && role !== "user" && role !== "assistant") {
@@ -585,9 +693,20 @@ Options:
     if (selected.cwd && existsSync(selected.cwd)) {
       process.chdir(selected.cwd);
     }
-    console.log(`\nResuming session: ${selected.sessionId} (in ${process.cwd()})`);
-    const result = spawnSync("claude", ["--resume", selected.sessionId], { stdio: "inherit", cwd: process.cwd() });
-    process.exit(result.status ?? 0);
+    const execTemplate = (values.exec as string | undefined) || config.exec;
+    if (execTemplate) {
+      const cmd = execTemplate
+        .replace(/\{sessionId\}/g, selected.sessionId)
+        .replace(/\{cwd\}/g, selected.cwd || process.cwd())
+        .replace(/\{project\}/g, selected.cwd || "");
+      const userShell = process.env.SHELL || "sh";
+      const result = spawnSync(userShell, ["-i", "-c", cmd], { stdio: "inherit", cwd: process.cwd() });
+      process.exit(result.status ?? 0);
+    } else {
+      console.log(`\nResuming session: ${selected.sessionId} (in ${process.cwd()})`);
+      const result = spawnSync("claude", ["--resume", selected.sessionId], { stdio: "inherit", cwd: process.cwd() });
+      process.exit(result.status ?? 0);
+    }
   }
 }
 
