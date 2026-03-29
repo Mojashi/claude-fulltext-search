@@ -2,6 +2,12 @@
 
 Full-text search for [Claude Code](https://claude.ai/claude-code) chat history with fzf-powered TUI.
 
+## Install
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/Mojashi/claude-fulltext-search/main/install.sh | sh
+```
+
 ![screenshot](screenshot.svg)
 
 ## Features
@@ -15,12 +21,6 @@ Full-text search for [Claude Code](https://claude.ai/claude-code) chat history w
 - Incremental index caching for fast repeated searches
 - Auto-downloads fzf if not installed
 - Self-update from GitHub releases
-
-## Install
-
-```sh
-curl -fsSL https://raw.githubusercontent.com/Mojashi/claude-fulltext-search/main/install.sh | sh
-```
 
 Or specify a custom install directory:
 
