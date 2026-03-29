@@ -2,7 +2,7 @@
 set -e
 
 REPO="Mojashi/claude-fulltext-search"
-INSTALL_DIR="${INSTALL_DIR:-/usr/local/bin}"
+INSTALL_DIR="${INSTALL_DIR:-$HOME/.local/bin}"
 
 # Detect platform
 OS="$(uname -s)"
@@ -37,13 +37,20 @@ fi
 
 chmod +x "$TMP"
 
-# Install
-if [ -w "$INSTALL_DIR" ]; then
-  mv "$TMP" "${INSTALL_DIR}/claude-search"
-else
-  echo "Installing to ${INSTALL_DIR} (requires sudo)..."
-  sudo mv "$TMP" "${INSTALL_DIR}/claude-search"
-fi
+# Ensure install directory exists
+mkdir -p "$INSTALL_DIR"
+mv "$TMP" "${INSTALL_DIR}/claude-search"
 
 echo "claude-search installed to ${INSTALL_DIR}/claude-search"
-echo "Run 'claude-search' to get started."
+
+# Check if install dir is in PATH
+case ":$PATH:" in
+  *":${INSTALL_DIR}:"*) ;;
+  *)
+    echo ""
+    echo "Add ${INSTALL_DIR} to your PATH:"
+    echo ""
+    echo "  echo 'export PATH=\"${INSTALL_DIR}:\$PATH\"' >> ~/.zshrc"
+    echo ""
+    ;;
+esac
