@@ -606,9 +606,21 @@ async function selfUpdate() {
 
   await Bun.write(tmpPath, binRes);
   execSync(`chmod +x "${tmpPath}"`);
-  renameSync(tmpPath, binPath);
 
-  console.log(`Updated to ${tag}`);
+  try {
+    renameSync(tmpPath, binPath);
+    console.log(`Updated to ${tag}`);
+  } catch {
+    // Current location not writable, install to ~/.local/bin
+    const fallbackDir = join(homedir(), ".local", "bin");
+    await mkdir(fallbackDir, { recursive: true });
+    const fallbackPath = join(fallbackDir, "claude-search");
+    renameSync(tmpPath, fallbackPath);
+    console.log(`Updated to ${tag} (installed to ${fallbackPath})`);
+    if (!process.env.PATH?.includes(fallbackDir)) {
+      console.log(`\nAdd ${fallbackDir} to your PATH:\n  echo 'export PATH="${fallbackDir}:$PATH"' >> ~/.zshrc`);
+    }
+  }
 }
 
 // --- main ---
