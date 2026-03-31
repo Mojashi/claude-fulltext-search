@@ -6,7 +6,7 @@ import { spawnSync, execSync } from "child_process";
 import { parseArgs } from "util";
 import * as readline from "readline";
 
-const VERSION = "0.6.0";
+const VERSION = "0.7.0";
 const CLAUDE_PROJECTS_DIR = join(homedir(), ".claude", "projects");
 const CACHE_DIR = join(homedir(), ".cache", "claude-search");
 const CONFIG_DIR = join(homedir(), ".config", "claude-search");
@@ -173,16 +173,16 @@ interface FileCache {
 }
 
 interface CacheData {
-  version: 3;
+  version: 4;
   files: Record<string, FileCache>; // key: "projDirName/sessionId"
 }
 
 async function loadCache(): Promise<CacheData> {
   try {
     const data = JSON.parse(await readFile(join(CACHE_DIR, "index.json"), "utf-8"));
-    if (data.version === 3) return data as CacheData;
+    if (data.version === 4) return data as CacheData;
   } catch {}
-  return { version: 3, files: {} };
+  return { version: 4, files: {} };
 }
 
 async function saveCache(cache: CacheData) {
@@ -192,6 +192,7 @@ async function saveCache(cache: CacheData) {
 
 function makeEntries(messages: Message[], startIdx: number, sessionId: string, projDirName: string, projDisplay: string): string[] {
   const shortProj = shortenPath(projDisplay);
+  const shortSession = sessionId.slice(0, 8);
   const entries: string[] = [];
   for (let i = 0; i < messages.length; i++) {
     const msg = messages[i];
@@ -199,7 +200,7 @@ function makeEntries(messages: Message[], startIdx: number, sessionId: string, p
     let firstLine = msg.text.replace(/[\n\t]/g, " ").trim();
     if (firstLine.length > 200) firstLine = firstLine.slice(0, 200) + "...";
     const R = "\x1b[0m";
-    entries.push(`\x1b[1;36m${shortProj}${R}\t${firstLine}\t${msg.role}\t${ts}\t${sessionId}\t${startIdx + i}\t${projDirName}\t${projDisplay}`);
+    entries.push(`\x1b[1;36m${shortProj} \x1b[33m${shortSession}${R}\t${firstLine}\t${msg.role}\t${ts}\t${sessionId}\t${startIdx + i}\t${projDirName}\t${projDisplay}`);
   }
   return entries;
 }
@@ -311,7 +312,7 @@ async function buildIndex(): Promise<string[]> {
     if (appends > 0) parts.push(`${appends} appended`);
     if (hits > 0) parts.push(`${hits} cached`);
     process.stderr.write(`(${parts.join(", ")}) `);
-    await saveCache({ version: 3, files: newFiles });
+    await saveCache({ version: 4, files: newFiles });
   } else {
     process.stderr.write("(cached) ");
   }
@@ -543,6 +544,7 @@ function runFzf(fzfPath: string, entries: string[], query?: string): { sessionId
     "--ansi",
     "--delimiter", "\t",
     "--with-nth", "1..2",
+    "--nth", "2",
     "--preview", previewCmd,
     "--preview-window", "right:60%:wrap",
     "--header", "Enter: resume session | Ctrl-C: quit",
