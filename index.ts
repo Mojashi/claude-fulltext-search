@@ -603,7 +603,7 @@ async function selfUpdate() {
     process.exit(1);
   }
 
-  const binPath = process.execPath;
+  const binPath = process.argv[0];
   const tmpPath = binPath + ".tmp";
 
   await Bun.write(tmpPath, binRes);
