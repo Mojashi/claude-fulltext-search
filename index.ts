@@ -6,7 +6,7 @@ import { spawnSync, execSync } from "child_process";
 import { parseArgs } from "util";
 import * as readline from "readline";
 
-const VERSION = "0.7.0";
+const VERSION = "0.8.0";
 const CLAUDE_PROJECTS_DIR = join(homedir(), ".claude", "projects");
 const CACHE_DIR = join(homedir(), ".cache", "claude-search");
 const CONFIG_DIR = join(homedir(), ".config", "claude-search");
@@ -538,7 +538,29 @@ function runFzf(fzfPath: string, entries: string[], query?: string): { sessionId
     return null;
   }
 
+  // Write entries to temp file so fzf reload can re-read with filters
+  const entriesFile = join(CACHE_DIR, "fzf-entries.tmp");
+  const { writeFileSync } = require("fs");
+  writeFileSync(entriesFile, entries.join("\n"));
+
   const previewCmd = `${process.execPath} ${SCRIPT_PATH} --preview {5}:{6}:{7} --highlight "$FZF_QUERY"`;
+
+  // Helper script: deduplicate entries by sessionId (tab-separated field 5)
+  const dedupeScript = join(CACHE_DIR, "fzf-dedup.sh");
+  writeFileSync(dedupeScript, `#!/bin/sh\nawk -F'\t' '!seen[$5]++' '${entriesFile}'\n`);
+  require("fs").chmodSync(dedupeScript, 0o755);
+
+  // Ctrl-U toggle script
+  const toggleScript = join(CACHE_DIR, "fzf-toggle.sh");
+  writeFileSync(toggleScript, [
+    '#!/bin/sh',
+    'if [ "$FZF_PROMPT" = "unique> " ]; then',
+    `  echo "reload(cat '${entriesFile}')+change-prompt(> )"`,
+    'else',
+    `  echo "reload(sh '${dedupeScript}')+change-prompt(unique> )"`,
+    'fi',
+  ].join('\n'));
+  require("fs").chmodSync(toggleScript, 0o755);
 
   const fzfArgs = [
     "--ansi",
@@ -547,11 +569,12 @@ function runFzf(fzfPath: string, entries: string[], query?: string): { sessionId
     "--nth", "2",
     "--preview", previewCmd,
     "--preview-window", "right:60%:wrap",
-    "--header", "Enter: resume session | Ctrl-C: quit",
+    "--header", "Enter: resume | Ctrl-S: toggle unique sessions | Ctrl-C: quit",
     "--no-hscroll",
     "--no-sort",
     "--tac",
     "--bind", "change:refresh-preview",
+    "--bind", `ctrl-s:transform(sh '${toggleScript}')`,
   ];
 
   if (query) fzfArgs.push("--query", query);
@@ -561,6 +584,11 @@ function runFzf(fzfPath: string, entries: string[], query?: string): { sessionId
     stdio: ["pipe", "pipe", "inherit"],
     encoding: "utf-8",
   });
+
+  // Clean up temp files
+  try { require("fs").unlinkSync(entriesFile); } catch {}
+  try { require("fs").unlinkSync(dedupeScript); } catch {}
+  try { require("fs").unlinkSync(toggleScript); } catch {}
 
   if (result.status !== 0 || !result.stdout) return null;
 
