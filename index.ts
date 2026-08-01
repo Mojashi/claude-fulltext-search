@@ -6,16 +6,25 @@ import { spawnSync, execSync } from "child_process";
 import { parseArgs } from "util";
 import * as readline from "readline";
 
-const VERSION = "0.8.0";
+const VERSION = "0.9.0";
 const CLAUDE_PROJECTS_DIR = join(homedir(), ".claude", "projects");
+const CODEX_SESSIONS_DIR = join(homedir(), ".codex", "sessions");
 const CACHE_DIR = join(homedir(), ".cache", "claude-search");
 const CONFIG_DIR = join(homedir(), ".config", "claude-search");
 const CONFIG_PATH = join(CONFIG_DIR, "config.json");
 const SCRIPT_PATH = process.argv[1];
 const REPO = "Mojashi/claude-fulltext-search";
 
+type Source = "claude" | "codex";
+
+const DEFAULT_EXEC: Record<Source, string> = {
+  claude: "claude --resume {sessionId}",
+  codex: "codex resume {sessionId}",
+};
+
 interface Config {
   exec?: string;
+  execCodex?: string;
 }
 
 function loadConfig(): Config {
@@ -46,14 +55,21 @@ async function ensureConfig(): Promise<Config> {
 
   process.stderr.write("\n=== claude-search: initial setup ===\n\n");
   process.stderr.write("Command to run when a session is selected.\n");
-  process.stderr.write("Placeholders: {sessionId}, {cwd}, {project}\n");
-  process.stderr.write(`Default: claude --resume {sessionId}\n\n`);
+  process.stderr.write("Placeholders: {sessionId}, {cwd}, {project}\n\n");
 
-  const answer = await prompt("exec template (Enter for default): ");
   const config: Config = {};
+  process.stderr.write(`Default for Claude Code sessions: ${DEFAULT_EXEC.claude}\n`);
+  const answer = await prompt("exec template (Enter for default): ");
   if (answer.trim()) {
     config.exec = answer.trim();
   }
+
+  process.stderr.write(`\nDefault for Codex sessions: ${DEFAULT_EXEC.codex}\n`);
+  const answerCodex = await prompt("codex exec template (Enter for default): ");
+  if (answerCodex.trim()) {
+    config.execCodex = answerCodex.trim();
+  }
+
   await saveConfig(config);
   process.stderr.write(`Config saved to ${CONFIG_PATH} (change later with --setup)\n\n`);
   return config;
@@ -142,6 +158,129 @@ function parseMessages(lines: string[]): Message[] {
   return messages;
 }
 
+// --- codex (~/.codex/sessions/YYYY/MM/DD/rollout-<ts>-<uuid>.jsonl) ---
+
+// Content blocks are [{type: "input_text"|"output_text", text}] in both formats.
+function codexBlocks(content: any): string {
+  if (typeof content === "string") return content;
+  if (Array.isArray(content)) {
+    return content
+      .map((b: any) => (typeof b === "string" ? b : b?.text ?? ""))
+      .filter(Boolean)
+      .join("\n");
+  }
+  return "";
+}
+
+function codexToolOutput(output: any): string {
+  if (typeof output === "string") return output;
+  if (output && typeof output === "object") {
+    if (typeof output.output === "string") return output.output;
+    return codexBlocks(output.content);
+  }
+  return "";
+}
+
+function codexToolCallText(name: any, args: any): string {
+  const body = typeof args === "string" ? args : args ? JSON.stringify(args) : "";
+  return [name, body].filter(Boolean).join(" ");
+}
+
+interface CodexSession {
+  cwd: string | null;
+  messages: Message[];
+  legacy: boolean;
+}
+
+// Two on-disk formats exist: the current one wraps every record in
+// {type, payload, timestamp}, the pre-0.4x one writes bare {type: "message"|...}
+// records after an untyped header line.
+function parseCodexSession(lines: string[], knownLegacy?: boolean): CodexSession {
+  const messages: Message[] = [];
+  let cwd: string | null = null;
+  let legacy = knownLegacy ?? false;
+  let modeKnown = knownLegacy !== undefined;
+  let headerTs: any = null;
+
+  const push = (role: string, text: string, timestamp: any) => {
+    if (text) messages.push({ role, text, timestamp });
+  };
+
+  for (const line of lines) {
+    if (!line.trim()) continue;
+    let d: any;
+    try {
+      d = JSON.parse(line);
+    } catch {
+      continue;
+    }
+    if (!d || typeof d !== "object") continue;
+
+    if (!modeKnown) {
+      legacy = typeof d.type !== "string";
+      modeKnown = true;
+    }
+
+    if (legacy) {
+      if (typeof d.type !== "string") {
+        // header line: {id, timestamp, git}
+        if (d.timestamp && !headerTs) headerTs = d.timestamp;
+        continue;
+      }
+      const ts = d.timestamp ?? headerTs;
+      if (d.type === "message" && (d.role === "user" || d.role === "assistant")) {
+        const text = codexBlocks(d.content);
+        if (!cwd && d.role === "user") cwd = extractCodexCwd(text);
+        push(d.role, text, ts);
+      } else if (d.type === "function_call") {
+        push("assistant", codexToolCallText(d.name, d.arguments), ts);
+      } else if (d.type === "function_call_output") {
+        push("user", codexToolOutput(d.output), ts);
+      }
+      continue;
+    }
+
+    const p = d.payload;
+    if (!p || typeof p !== "object") continue;
+    const ts = d.timestamp;
+
+    if (d.type === "session_meta") {
+      if (!cwd && typeof p.cwd === "string") cwd = p.cwd;
+    } else if (d.type === "turn_context") {
+      if (!cwd && typeof p.cwd === "string") cwd = p.cwd;
+    } else if (d.type === "event_msg") {
+      // user_message/agent_message are the clean turn boundaries; the matching
+      // response_item entries also carry injected context, so skip those.
+      if (p.type === "user_message") push("user", p.message ?? "", ts);
+      else if (p.type === "agent_message") push("assistant", p.message ?? "", ts);
+    } else if (d.type === "response_item") {
+      if (p.type === "function_call") push("assistant", codexToolCallText(p.name, p.arguments), ts);
+      else if (p.type === "custom_tool_call") push("assistant", codexToolCallText(p.name, p.input), ts);
+      else if (p.type === "function_call_output" || p.type === "custom_tool_call_output") {
+        push("user", codexToolOutput(p.output), ts);
+      } else if (p.type === "web_search_call") {
+        const a = p.action;
+        const q = Array.isArray(a?.queries) ? a.queries.join(", ") : a?.query ?? "";
+        push("assistant", q ? `web_search ${q}` : "", ts);
+      }
+    }
+  }
+
+  return { cwd, messages, legacy };
+}
+
+// Legacy sessions have no session_meta; cwd only appears in the injected
+// <environment_context> of the first user message.
+function extractCodexCwd(text: string): string | null {
+  const m = text.match(/<cwd>([^<]+)<\/cwd>/);
+  return m ? m[1].trim() : null;
+}
+
+function codexSessionIdFromName(fileName: string): string {
+  const m = fileName.match(/([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})\.jsonl$/);
+  return m ? m[1] : basename(fileName, ".jsonl");
+}
+
 async function readJsonlLines(path: string): Promise<string[]> {
   try {
     const content = await readFile(path, "utf-8");
@@ -165,24 +304,27 @@ async function readJsonlTail(path: string, offset: number): Promise<string[]> {
 
 // --- cache (incremental, per-file with append support) ---
 
+const CACHE_VERSION = 5;
+
 interface FileCache {
   size: number;
   cwd: string | null;
   msgCount: number; // total messages indexed so far
   entries: string[];
+  legacy?: boolean; // codex only: pre-payload rollout format
 }
 
 interface CacheData {
-  version: 4;
-  files: Record<string, FileCache>; // key: "projDirName/sessionId"
+  version: typeof CACHE_VERSION;
+  files: Record<string, FileCache>; // key: "<source>:<locator>/<sessionId>"
 }
 
 async function loadCache(): Promise<CacheData> {
   try {
     const data = JSON.parse(await readFile(join(CACHE_DIR, "index.json"), "utf-8"));
-    if (data.version === 4) return data as CacheData;
+    if (data.version === CACHE_VERSION) return data as CacheData;
   } catch {}
-  return { version: 4, files: {} };
+  return { version: CACHE_VERSION, files: {} };
 }
 
 async function saveCache(cache: CacheData) {
@@ -190,30 +332,40 @@ async function saveCache(cache: CacheData) {
   await Bun.write(join(CACHE_DIR, "index.json"), JSON.stringify(cache));
 }
 
-function makeEntries(messages: Message[], startIdx: number, sessionId: string, projDirName: string, projDisplay: string): string[] {
+function makeEntries(
+  messages: Message[],
+  startIdx: number,
+  sessionId: string,
+  locator: string,
+  projDisplay: string,
+  source: Source,
+): string[] {
   const shortProj = shortenPath(projDisplay);
   const shortSession = sessionId.slice(0, 8);
   const entries: string[] = [];
+  const tag = source === "codex" ? "\x1b[1;35mcx\x1b[0m" : "\x1b[1;34mcc\x1b[0m";
   for (let i = 0; i < messages.length; i++) {
     const msg = messages[i];
     const ts = formatTimestamp(msg.timestamp);
     let firstLine = msg.text.replace(/[\n\t]/g, " ").trim();
     if (firstLine.length > 200) firstLine = firstLine.slice(0, 200) + "...";
     const R = "\x1b[0m";
-    entries.push(`\x1b[1;36m${shortProj} \x1b[33m${shortSession}${R}\t${firstLine}\t${msg.role}\t${ts}\t${sessionId}\t${startIdx + i}\t${projDirName}\t${projDisplay}`);
+    entries.push(`${tag} \x1b[1;36m${shortProj} \x1b[33m${shortSession}${R}\t${firstLine}\t${msg.role}\t${ts}\t${sessionId}\t${startIdx + i}\t${locator}\t${projDisplay}\t${source}`);
   }
   return entries;
 }
 
 // --- index ---
 
-async function processFile(
-  filePath: string,
-  sessionId: string,
-  projDirName: string,
-  fileSize: number,
-  cached: FileCache | undefined,
-): Promise<FileCache> {
+interface SessionFile {
+  key: string;
+  filePath: string;
+  sessionId: string;
+  locator: string; // claude: project dir name, codex: path relative to sessions dir
+  source: Source;
+}
+
+async function processFile(f: SessionFile, fileSize: number, cached: FileCache | undefined): Promise<FileCache> {
   // Exact match - no changes
   if (cached && cached.size === fileSize) {
     return cached;
@@ -221,30 +373,96 @@ async function processFile(
 
   // File grew - read only the appended portion
   if (cached && cached.size < fileSize) {
-    const tailLines = await readJsonlTail(filePath, cached.size);
-    const projDisplay = cached.cwd || projDirName;
-    const newMessages = parseMessages(tailLines);
-    const newEntries = makeEntries(newMessages, cached.msgCount, sessionId, projDirName, projDisplay);
+    const tailLines = await readJsonlTail(f.filePath, cached.size);
+    const projDisplay = cached.cwd || f.locator;
+    const newMessages =
+      f.source === "codex" ? parseCodexSession(tailLines, cached.legacy ?? false).messages : parseMessages(tailLines);
+    const newEntries = makeEntries(newMessages, cached.msgCount, f.sessionId, f.locator, projDisplay, f.source);
     return {
       size: fileSize,
       cwd: cached.cwd,
       msgCount: cached.msgCount + newMessages.length,
       entries: [...cached.entries, ...newEntries],
+      legacy: cached.legacy,
     };
   }
 
   // New file or file shrunk (shouldn't happen but handle it) - full reindex
-  const lines = await readJsonlLines(filePath);
-  const cwd = getProjectCwd(lines);
-  const projDisplay = cwd || projDirName;
-  const messages = parseMessages(lines);
-  const entries = makeEntries(messages, 0, sessionId, projDirName, projDisplay);
-  return { size: fileSize, cwd, msgCount: messages.length, entries };
+  const lines = await readJsonlLines(f.filePath);
+  let cwd: string | null;
+  let messages: Message[];
+  let legacy: boolean | undefined;
+  if (f.source === "codex") {
+    const parsed = parseCodexSession(lines);
+    cwd = parsed.cwd;
+    messages = parsed.messages;
+    legacy = parsed.legacy;
+  } else {
+    cwd = getProjectCwd(lines);
+    messages = parseMessages(lines);
+  }
+  const projDisplay = cwd || f.locator;
+  const entries = makeEntries(messages, 0, f.sessionId, f.locator, projDisplay, f.source);
+  return { size: fileSize, cwd, msgCount: messages.length, entries, legacy };
 }
 
-async function buildIndex(): Promise<string[]> {
+async function collectClaudeFiles(): Promise<SessionFile[]> {
   if (!existsSync(CLAUDE_PROJECTS_DIR)) return [];
+  const files: SessionFile[] = [];
+  const projDirs = (await readdir(CLAUDE_PROJECTS_DIR, { withFileTypes: true }))
+    .filter((d) => d.isDirectory())
+    .sort((a, b) => a.name.localeCompare(b.name));
+  for (const projDir of projDirs) {
+    const projPath = join(CLAUDE_PROJECTS_DIR, projDir.name);
+    const jsonl = (await readdir(projPath)).filter((f) => f.endsWith(".jsonl")).sort();
+    for (const f of jsonl) {
+      const sessionId = basename(f, ".jsonl");
+      files.push({
+        key: `claude:${projDir.name}/${sessionId}`,
+        filePath: join(projPath, f),
+        sessionId,
+        locator: projDir.name,
+        source: "claude",
+      });
+    }
+  }
+  return files;
+}
 
+// Sessions are nested as YYYY/MM/DD/rollout-*.jsonl
+async function collectCodexFiles(): Promise<SessionFile[]> {
+  if (!existsSync(CODEX_SESSIONS_DIR)) return [];
+  const files: SessionFile[] = [];
+
+  const walk = async (dir: string, rel: string) => {
+    const dirents = await readdir(dir, { withFileTypes: true });
+    const subdirs: string[] = [];
+    for (const d of dirents) {
+      if (d.isDirectory()) subdirs.push(d.name);
+      else if (d.name.endsWith(".jsonl")) {
+        const locator = rel ? `${rel}/${d.name}` : d.name;
+        const sessionId = codexSessionIdFromName(d.name);
+        files.push({
+          key: `codex:${locator}`,
+          filePath: join(dir, d.name),
+          sessionId,
+          locator,
+          source: "codex",
+        });
+      }
+    }
+    subdirs.sort();
+    for (const sub of subdirs) {
+      await walk(join(dir, sub), rel ? `${rel}/${sub}` : sub);
+    }
+  };
+
+  await walk(CODEX_SESSIONS_DIR, "");
+  files.sort((a, b) => a.locator.localeCompare(b.locator));
+  return files;
+}
+
+async function buildIndex(sources: Source[]): Promise<string[]> {
   const cache = await loadCache();
   const newFiles: Record<string, FileCache> = {};
   const allEntries: string[] = [];
@@ -252,26 +470,19 @@ async function buildIndex(): Promise<string[]> {
   let appends = 0;
   let full = 0;
 
-  const projDirs = (await readdir(CLAUDE_PROJECTS_DIR, { withFileTypes: true }))
-    .filter((d) => d.isDirectory())
-    .sort((a, b) => a.name.localeCompare(b.name));
-
   // Collect all files
-  const allFiles: { key: string; filePath: string; sessionId: string; projDirName: string }[] = [];
-  for (const projDir of projDirs) {
-    const projPath = join(CLAUDE_PROJECTS_DIR, projDir.name);
-    const files = (await readdir(projPath)).filter((f) => f.endsWith(".jsonl")).sort();
-    for (const f of files) {
-      const sessionId = basename(f, ".jsonl");
-      allFiles.push({ key: `${projDir.name}/${sessionId}`, filePath: join(projPath, f), sessionId, projDirName: projDir.name });
-    }
-  }
+  const collected = await Promise.all([
+    sources.includes("claude") ? collectClaudeFiles() : Promise.resolve([]),
+    sources.includes("codex") ? collectCodexFiles() : Promise.resolve([]),
+  ]);
+  const allFiles = collected.flat();
+  if (!allFiles.length) return [];
 
   // Stat all files in parallel
   const stats = await Promise.all(allFiles.map((f) => stat(f.filePath)));
 
   // Separate: exact hits vs needs processing
-  const toProcess: { file: typeof allFiles[0]; size: number; cached?: FileCache }[] = [];
+  const toProcess: { file: SessionFile; size: number; cached?: FileCache }[] = [];
   for (let i = 0; i < allFiles.length; i++) {
     const f = allFiles[i];
     const size = stats[i].size;
@@ -293,7 +504,7 @@ async function buildIndex(): Promise<string[]> {
       const batch = toProcess.slice(i, i + BATCH);
       const results = await Promise.all(
         batch.map(({ file, size, cached }) =>
-          processFile(file.filePath, file.sessionId, file.projDirName, size, cached).then((fc) => ({ key: file.key, fc, wasAppend: !!(cached && cached.size < size) }))
+          processFile(file, size, cached).then((fc) => ({ key: file.key, fc, wasAppend: !!(cached && cached.size < size) }))
         )
       );
       for (const { key, fc, wasAppend } of results) {
@@ -312,7 +523,12 @@ async function buildIndex(): Promise<string[]> {
     if (appends > 0) parts.push(`${appends} appended`);
     if (hits > 0) parts.push(`${hits} cached`);
     process.stderr.write(`(${parts.join(", ")}) `);
-    await saveCache({ version: 4, files: newFiles });
+    // Keep cached entries for sources that were not indexed in this run
+    for (const [key, fc] of Object.entries(cache.files)) {
+      const src = key.startsWith("codex:") ? "codex" : "claude";
+      if (!sources.includes(src) && !newFiles[key]) newFiles[key] = fc;
+    }
+    await saveCache({ version: CACHE_VERSION, files: newFiles });
   } else {
     process.stderr.write("(cached) ");
   }
@@ -370,12 +586,21 @@ function highlightText(text: string, query?: string): string {
   return text;
 }
 
-async function previewMessage(projDirName: string, sessionId: string, msgIndex: number, highlight?: string) {
-  const jsonlPath = join(CLAUDE_PROJECTS_DIR, projDirName, `${sessionId}.jsonl`);
+async function previewMessage(locator: string, sessionId: string, msgIndex: number, source: Source, highlight?: string) {
+  const jsonlPath =
+    source === "codex" ? join(CODEX_SESSIONS_DIR, locator) : join(CLAUDE_PROJECTS_DIR, locator, `${sessionId}.jsonl`);
   const lines = await readJsonlLines(jsonlPath);
-  const messages = parseMessages(lines);
-  const cwd = getProjectCwd(lines);
-  const projDisplay = cwd || projDirName;
+  let messages: Message[];
+  let cwd: string | null;
+  if (source === "codex") {
+    const parsed = parseCodexSession(lines);
+    messages = parsed.messages;
+    cwd = parsed.cwd;
+  } else {
+    messages = parseMessages(lines);
+    cwd = getProjectCwd(lines);
+  }
+  const projDisplay = cwd || locator;
 
   const ctx = 5;
   const start = Math.max(0, msgIndex - ctx);
@@ -383,8 +608,8 @@ async function previewMessage(projDirName: string, sessionId: string, msgIndex: 
 
   const out: string[] = [];
   out.push(`\x1b[1;36m${projDisplay}\x1b[0m`);
-  out.push(`\x1b[2msession: ${sessionId}\x1b[0m`);
-  out.push(`\x1b[2mresume:  claude --resume ${sessionId}\x1b[0m`);
+  out.push(`\x1b[2msession: ${sessionId} (${source})\x1b[0m`);
+  out.push(`\x1b[2mresume:  ${DEFAULT_EXEC[source].replace("{sessionId}", sessionId)}\x1b[0m`);
   out.push("");
 
   for (let i = start; i < end; i++) {
@@ -532,7 +757,7 @@ async function ensureFzf(): Promise<string> {
   return await installFzf();
 }
 
-function runFzf(fzfPath: string, entries: string[], query?: string): { sessionId: string; cwd: string } | null {
+function runFzf(fzfPath: string, entries: string[], query?: string): { sessionId: string; cwd: string; source: Source } | null {
   if (!entries.length) {
     console.error("No conversations found.");
     return null;
@@ -543,7 +768,7 @@ function runFzf(fzfPath: string, entries: string[], query?: string): { sessionId
   const { writeFileSync } = require("fs");
   writeFileSync(entriesFile, entries.join("\n"));
 
-  const previewCmd = `${process.execPath} ${SCRIPT_PATH} --preview {5}:{6}:{7} --highlight "$FZF_QUERY"`;
+  const previewCmd = `${process.execPath} ${SCRIPT_PATH} --preview {5}:{6}:{7} --source {9} --highlight "$FZF_QUERY"`;
 
   // Helper script: deduplicate entries by sessionId (tab-separated field 5)
   const dedupeScript = join(CACHE_DIR, "fzf-dedup.sh");
@@ -594,8 +819,9 @@ function runFzf(fzfPath: string, entries: string[], query?: string): { sessionId
 
   const selected = result.stdout.trim();
   const parts = selected.split("\t");
-  if (parts.length >= 8) return { sessionId: parts[4], cwd: parts[7] };
-  if (parts.length >= 5) return { sessionId: parts[4], cwd: "" };
+  const source: Source = parts[8] === "codex" ? "codex" : "claude";
+  if (parts.length >= 8) return { sessionId: parts[4], cwd: parts[7], source };
+  if (parts.length >= 5) return { sessionId: parts[4], cwd: "", source };
   return null;
 }
 
@@ -655,12 +881,20 @@ async function selfUpdate() {
 
 // --- main ---
 
+function parseSources(value: string | undefined): Source[] {
+  if (!value || value === "all") return ["claude", "codex"];
+  if (value === "claude" || value === "codex") return [value];
+  console.error("--source must be 'claude', 'codex' or 'all'");
+  process.exit(1);
+}
+
 async function main() {
   const { values, positionals } = parseArgs({
     args: Bun.argv.slice(2),
     options: {
       project: { type: "string", short: "p" },
       role: { type: "string", short: "r" },
+      source: { type: "string", short: "s" },
       "list-projects": { type: "boolean" },
       setup: { type: "boolean" },
       "clear-cache": { type: "boolean" },
@@ -686,7 +920,9 @@ async function main() {
 Options:
   -p, --project <path>   Filter by project path (exact if exists, otherwise substring)
   -r, --role <role>      Filter by role (user|assistant)
-  -e, --exec <template>  Command to run on selection (default: claude --resume {sessionId})
+  -s, --source <source>  Filter by agent (claude|codex|all, default: all)
+  -e, --exec <template>  Command to run on selection
+                         (default: '${DEFAULT_EXEC.claude}' / '${DEFAULT_EXEC.codex}')
                          Placeholders: {sessionId}, {cwd}, {project}
   --list-projects        List all projects
   --setup                Configure settings interactively
@@ -703,29 +939,30 @@ Options:
     process.stderr.write(`Config: ${CONFIG_PATH}\n\n`);
 
     process.stderr.write(`Command to run when a session is selected.\n`);
-    process.stderr.write(`Placeholders: {sessionId}, {cwd}, {project}\n`);
-    process.stderr.write(`Current: ${config.exec || "(default) claude --resume {sessionId}"}\n\n`);
+    process.stderr.write(`Placeholders: {sessionId}, {cwd}, {project}\n\n`);
 
+    process.stderr.write(`Claude Code current: ${config.exec || `(default) ${DEFAULT_EXEC.claude}`}\n`);
     const answer = await prompt("exec template (Enter to keep, 'reset' for default): ");
-    if (answer.trim().toLowerCase() === "reset") {
-      delete config.exec;
-      await saveConfig(config);
-      console.log("Reset to default.");
-    } else if (answer.trim()) {
-      config.exec = answer.trim();
-      await saveConfig(config);
-      console.log(`Set to: ${config.exec}`);
-    } else {
-      console.log("No changes.");
-    }
+    if (answer.trim().toLowerCase() === "reset") delete config.exec;
+    else if (answer.trim()) config.exec = answer.trim();
+
+    process.stderr.write(`\nCodex current: ${config.execCodex || `(default) ${DEFAULT_EXEC.codex}`}\n`);
+    const answerCodex = await prompt("codex exec template (Enter to keep, 'reset' for default): ");
+    if (answerCodex.trim().toLowerCase() === "reset") delete config.execCodex;
+    else if (answerCodex.trim()) config.execCodex = answerCodex.trim();
+
+    await saveConfig(config);
+    console.log(`\nclaude: ${config.exec || `(default) ${DEFAULT_EXEC.claude}`}`);
+    console.log(`codex:  ${config.execCodex || `(default) ${DEFAULT_EXEC.codex}`}`);
     return;
   }
 
   if (values.preview) {
     const parts = (values.preview as string).split(":");
     const [sessionId, msgIdx, ...rest] = parts;
-    const projDirName = rest.join(":");
-    await previewMessage(projDirName, sessionId, parseInt(msgIdx), values.highlight as string);
+    const locator = rest.join(":");
+    const source: Source = values.source === "codex" ? "codex" : "claude";
+    await previewMessage(locator, sessionId, parseInt(msgIdx), source, values.highlight as string);
     return;
   }
 
@@ -745,26 +982,27 @@ Options:
     return;
   }
 
+  const sources = parseSources(values.source as string | undefined);
+
   if (values["list-projects"]) {
-    if (!existsSync(CLAUDE_PROJECTS_DIR)) {
+    process.stderr.write("Indexing... ");
+    const entries = await buildIndex(sources);
+    process.stderr.write(`${entries.length} messages\n`);
+
+    const projects = new Map<string, Set<string>>();
+    for (const e of entries) {
+      const fields = e.split("\t");
+      const display = fields.length > 7 ? fields[7] : fields[0];
+      const sessions = projects.get(display) ?? new Set<string>();
+      sessions.add(`${fields[8] ?? "claude"}:${fields[4]}`);
+      projects.set(display, sessions);
+    }
+    if (!projects.size) {
       console.log("No projects found.");
       return;
     }
-    const seen = new Set<string>();
-    const projDirs = (await readdir(CLAUDE_PROJECTS_DIR, { withFileTypes: true }))
-      .filter((d) => d.isDirectory())
-      .sort((a, b) => a.name.localeCompare(b.name));
-    for (const projDir of projDirs) {
-      const projPath = join(CLAUDE_PROJECTS_DIR, projDir.name);
-      const jsonlFiles = (await readdir(projPath)).filter((f) => f.endsWith(".jsonl"));
-      if (!jsonlFiles.length) continue;
-      const lines = await readJsonlLines(join(projPath, jsonlFiles[0]));
-      const cwd = getProjectCwd(lines);
-      const display = cwd || projDir.name;
-      if (!seen.has(display)) {
-        seen.add(display);
-        console.log(`  ${display}  (${jsonlFiles.length} sessions)`);
-      }
+    for (const display of [...projects.keys()].sort()) {
+      console.log(`  ${display}  (${projects.get(display)!.size} sessions)`);
     }
     return;
   }
@@ -779,7 +1017,7 @@ Options:
   }
 
   process.stderr.write("Indexing... ");
-  let entries = await buildIndex();
+  let entries = await buildIndex(sources);
   const total = entries.length;
 
   entries = filterEntries(entries, values.project as string, role);
@@ -793,20 +1031,15 @@ Options:
     if (selected.cwd && existsSync(selected.cwd)) {
       process.chdir(selected.cwd);
     }
-    const execTemplate = (values.exec as string | undefined) || config.exec;
-    if (execTemplate) {
-      const cmd = execTemplate
-        .replace(/\{sessionId\}/g, selected.sessionId)
-        .replace(/\{cwd\}/g, selected.cwd || process.cwd())
-        .replace(/\{project\}/g, selected.cwd || "");
-      const userShell = process.env.SHELL || "sh";
-      const result = spawnSync(userShell, ["-i", "-c", cmd], { stdio: "inherit", cwd: process.cwd() });
-      process.exit(result.status ?? 0);
-    } else {
-      console.log(`\nResuming session: ${selected.sessionId} (in ${process.cwd()})`);
-      const result = spawnSync("claude", ["--resume", selected.sessionId], { stdio: "inherit", cwd: process.cwd() });
-      process.exit(result.status ?? 0);
-    }
+    const configured = selected.source === "codex" ? config.execCodex : config.exec;
+    const execTemplate = (values.exec as string | undefined) || configured || DEFAULT_EXEC[selected.source];
+    const cmd = execTemplate
+      .replace(/\{sessionId\}/g, selected.sessionId)
+      .replace(/\{cwd\}/g, selected.cwd || process.cwd())
+      .replace(/\{project\}/g, selected.cwd || "");
+    const userShell = process.env.SHELL || "sh";
+    const result = spawnSync(userShell, ["-i", "-c", cmd], { stdio: "inherit", cwd: process.cwd() });
+    process.exit(result.status ?? 0);
   }
 }
 
