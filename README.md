@@ -1,6 +1,6 @@
 # claude-fulltext-search
 
-Full-text search for [Claude Code](https://claude.ai/claude-code) and [Codex](https://developers.openai.com/codex/cli) chat history with fzf-powered TUI.
+Full-text search for [Claude Code](https://claude.ai/claude-code), [Codex](https://developers.openai.com/codex/cli), Antigravity (`agy`) and Kimi Code chat history with an fzf-powered TUI — plus a shared index that other tools can query over HTTP.
 
 ## Install
 
@@ -12,15 +12,14 @@ curl -fsSL https://raw.githubusercontent.com/Mojashi/claude-fulltext-search/main
 
 ## Features
 
-- Full-text search across all Claude Code **and Codex** conversations (including tool use / tool results)
-- fzf-powered interactive fuzzy finder with conversation preview (with query highlighting)
-- Preview shows latest messages in the session at a glance
-- Filter by project path, message role, or agent (claude / codex)
-- Resume sessions directly from search results (`claude --resume` / `codex resume`, auto `cd` to the correct directory)
-- Configurable exec command on selection (`--setup`)
-- Incremental index caching for fast repeated searches
-- Auto-downloads fzf if not installed
-- Self-update from GitHub releases
+- Full-text search across Claude Code, Codex, Antigravity and Kimi Code sessions (including tool use / tool results)
+- Substring matching that works for Japanese and other non-space-separated text (SQLite FTS5 trigram index); words are ANDed, `"quote"` a phrase
+- fzf UI: every keystroke searches the index; preview shows the matched message in context and the latest messages
+- Filter by project path, message role, or agent
+- Resume sessions directly from search results (auto `cd` to the session's directory)
+- Incremental indexing: only newly appended lines are read
+- Optional daemon (`claude-search serve`) that keeps the index current and answers an HTTP API for other tools
+- Auto-downloads fzf if not installed; self-update from GitHub releases
 
 Or specify a custom install directory:
 
@@ -62,7 +61,7 @@ claude-search -p ~/repos/my-project
 claude-search -r user
 claude-search -r assistant
 
-# Filter by agent (claude|codex|all, default: all)
+# Filter by agent (claude|codex|agy|kimi|all, default: all)
 claude-search -s codex
 
 # Custom command on selection
@@ -74,29 +73,44 @@ claude-search --list-projects
 # Configure settings (exec template, etc.)
 claude-search --setup
 
-# Clear index cache
+# Remove the pre-1.0 JSON cache (~/.cache/claude-search/index.json)
 claude-search --clear-cache
 ```
 
 ### Key bindings (in fzf)
 
-- Type to filter results
+- Type to search (each word must appear; `"two words"` for a phrase)
 - Up/Down to navigate
 - Enter to resume the selected session
 - Ctrl-C to quit
-- Prefix with `'` for exact match (e.g. `'mutool`)
 
-## How it works
+## Index and daemon
 
-Claude Code stores conversation history as JSONL files in `~/.claude/projects/`, and Codex stores session rollouts in `~/.codex/sessions/YYYY/MM/DD/`. This tool:
+All sessions go into one SQLite DB at `~/.cache/ai-session-index/index.db` (override with `AI_SESSION_INDEX_DB`).
 
-1. Indexes all messages (text, tool use inputs, tool results) from every session of both agents
-2. Caches the index incrementally — only re-reads files that changed or grew
-3. Pipes the index to fzf for interactive filtering with a conversation preview panel
-4. On selection, `cd`s to the original project directory and runs the configured command
-   (default: `claude --resume <session-id>` for Claude Code, `codex resume <session-id>` for Codex)
+- **Without a daemon**, `claude-search` brings the DB up to date itself before showing results.
+- **With a daemon**, `claude-search` asks it over HTTP instead. The daemon re-indexes every 60s.
 
-Each result is tagged with its agent: `cc` for Claude Code, `cx` for Codex.
+```bash
+claude-search daemon install     # macOS: run `claude-search serve` as a LaunchAgent
+claude-search daemon uninstall
+claude-search serve --port 8095  # or run it under your own supervisor
+```
+
+HTTP API (`http://127.0.0.1:8095`, override clients with `AI_SESSION_INDEX_URL`):
+
+| Endpoint | |
+|---|---|
+| `GET /health` | liveness |
+| `GET /status?source=` | sessions / messages per agent, indexer state |
+| `GET /search?q=&source=&project=&cwd=&role=&limit=200` | one hit per session, newest first |
+| `GET /sessions?source=&project=&cwd=&limit=30&offset=0` | latest sessions |
+| `GET /projects?source=` | projects with session counts |
+| `GET /session?source=&id=&project=` | full transcript, read fresh from disk |
+| `GET /prefix?prefix=&source=` | most recent session whose id starts with prefix |
+| `POST /reindex` | index now |
+
+Command-line access for scripts: `claude-search search <query> --json`, `claude-search status --json`, `claude-search index --json`, `claude-search dedupe`.
 
 ## License
 
