@@ -3,6 +3,7 @@
 import type { Database } from "bun:sqlite";
 import { homedir } from "os";
 import { basename, dirname } from "path";
+import { messageScore, sessionScore } from "./rank";
 import { cpLength, isoToMs, makeSnippet, termsOf } from "./text";
 
 /** A message that matched, with the session it belongs to. One per session. */
@@ -19,7 +20,15 @@ export interface Hit {
   hits: number;
   ending: string;
   path: string;
+  /** when the session was last active */
+  last_ts: string;
+  /** relevance, when sorted by it */
+  score?: number;
 }
+
+/** recent: the session where it was said most recently first. relevance: the session that matches best first. */
+export type SortOrder = "recent" | "relevance";
+export const SORT_ORDERS: readonly SortOrder[] = ["recent", "relevance"];
 
 export interface Filter {
   source?: string;
@@ -54,6 +63,8 @@ export function projectOf(source: string, cwd: string, path = ""): string {
 
 /** Messages newer than this many rows back are scanned when no term is long enough for FTS. */
 const RECENT_SCAN_ROWS = 150_000;
+/** Matching messages read to rank by relevance; beyond it the oldest ones are left out. */
+const RELEVANCE_CANDIDATES = 50_000;
 
 const quoteFts = (s: string) => `"${s.replaceAll('"', '""')}"`;
 
@@ -92,14 +103,18 @@ function filterSql(f: Filter, sessionAlias: string, messageAlias = sessionAlias)
 
 const HIT_COLUMNS = `m.session, m.source, COALESCE(s.cwd,'') AS cwd, m.role, m.ts, m.text,
   COALESCE(s.summary,'') AS summary, COALESCE(s.msg_count,0) AS msg_count, 1 AS hits,
-  COALESCE(s.ending,'') AS ending, COALESCE(s.path,'') AS path`;
+  COALESCE(s.ending,'') AS ending, COALESCE(s.path,'') AS path, COALESCE(s.last_ts,'') AS last_ts`;
 
 /**
- * Sessions containing every term of `query`, most recently active first.
+ * Sessions with a message containing every term of `query`, in `sort` order.
  * Terms of 3+ characters go through the trigram index; every term is then
  * confirmed with LIKE. With no terms, the most recent sessions are listed.
  */
-export function search(db: Database, query: string, { limit = 200, ...filter }: Filter & { limit?: number } = {}): Hit[] {
+export function search(
+  db: Database,
+  query: string,
+  { limit = 200, sort = "recent", ...filter }: Filter & { limit?: number; sort?: SortOrder } = {},
+): Hit[] {
   query = query.trim();
   if (!query && !filter.cwd && !filter.project) return [];
   const terms = termsOf(query);
@@ -125,9 +140,30 @@ export function search(db: Database, query: string, { limit = 200, ...filter }: 
   }
   const [fsql, fargs] = filterSql(filter, "s", "m");
   sql += fsql + " ORDER BY m.ts DESC LIMIT ?";
-  args.push(...fargs, Math.max(limit * 40, 2000));
+  args.push(...fargs, sort === "relevance" ? RELEVANCE_CANDIDATES : Math.max(limit * 40, 2000));
 
-  return onePerSession(db.query(sql).all(...(args as any[])) as Hit[], limit);
+  const rows = db.query(sql).all(...(args as any[])) as Hit[];
+  return sort === "relevance" ? bestPerSession(rows, terms, limit) : onePerSession(rows, limit);
+}
+
+/** Each session's best matching message, sessions ranked by relevance. */
+function bestPerSession(rows: Hit[], terms: string[], limit: number): Hit[] {
+  const lower = terms.map((t) => t.toLowerCase());
+  const sessions = new Map<string, { hit: Hit; best: number; hits: number }>();
+  for (const r of rows) {
+    const score = messageScore(r.text, r.role, lower);
+    const s = sessions.get(r.session);
+    if (!s) sessions.set(r.session, { hit: r, best: score, hits: 1 });
+    else {
+      s.hits++;
+      if (score > s.best) Object.assign(s, { hit: r, best: score });
+    }
+  }
+  const now = Date.now();
+  return [...sessions.values()]
+    .map(({ hit, best, hits }) => ({ ...hit, hits, score: sessionScore({ best, hits, summary: hit.summary, cwd: hit.cwd, ts: hit.ts, path: hit.path }, lower, now) }))
+    .sort((a, b) => b.score - a.score)
+    .slice(0, limit);
 }
 
 /** The newest hit of each session, counting how many hits each session had. */
@@ -167,6 +203,7 @@ function recentSessions(db: Database, filter: Filter, limit: number): Hit[] {
       hits: 1,
       ending: r.ending ?? "",
       path: r.path ?? "",
+      last_ts: r.last_ts ?? "",
     };
   });
 }
@@ -181,7 +218,7 @@ export interface SearchResult extends Hit {
   modified: number;
 }
 
-export function searchRich(db: Database, query: string, opts: Filter & { limit?: number } = {}): SearchResult[] {
+export function searchRich(db: Database, query: string, opts: Filter & { limit?: number; sort?: SortOrder } = {}): SearchResult[] {
   const terms = termsOf(query.trim());
   return search(db, query, opts).map((h) => {
     const ms = isoToMs(h.ts);

@@ -1,6 +1,6 @@
 # claude-fulltext-search
 
-Full-text search for [Claude Code](https://claude.ai/claude-code), [Codex](https://developers.openai.com/codex/cli), Antigravity (`agy`) and Kimi Code chat history with an fzf-powered TUI — plus a shared index that other tools can query over HTTP.
+Full-text search for [Claude Code](https://claude.ai/claude-code), [Codex](https://developers.openai.com/codex/cli), Antigravity (`agy`) and Kimi Code chat history with a full-screen picker — plus a shared index that other tools can query over HTTP.
 
 ## Install
 
@@ -14,12 +14,13 @@ curl -fsSL https://raw.githubusercontent.com/Mojashi/claude-fulltext-search/main
 
 - Full-text search across Claude Code, Codex, Antigravity and Kimi Code sessions (including tool use / tool results)
 - Substring matching that works for Japanese and other non-space-separated text (SQLite FTS5 trigram index); words are ANDed, `"quote"` a phrase
-- fzf UI: every keystroke searches the index; preview shows the matched message in context and the latest messages
+- Results ranked by relevance (whole words, phrases, who said it, how often, the session's first ask, recency); Ctrl-S for newest first
+- Full-screen picker: every keystroke searches the index; the preview opens the session at the matched message, with every match marked
 - Filter by project path, message role, or agent
 - Resume sessions directly from search results (auto `cd` to the session's directory)
 - Incremental indexing: only newly appended lines are read
 - Optional daemon (`claude-search serve`) that keeps the index current and answers an HTTP API for other tools
-- Auto-downloads fzf if not installed; self-update from GitHub releases
+- No dependencies; self-update from GitHub releases
 
 Or specify a custom install directory:
 
@@ -77,12 +78,22 @@ claude-search --setup
 claude-search --clear-cache
 ```
 
-### Key bindings (in fzf)
+### Keys
 
-- Type to search (each word must appear; `"two words"` for a phrase)
-- Up/Down to navigate
-- Enter to resume the selected session
-- Ctrl-C to quit
+| Key | |
+|---|---|
+| typing | search (each word must appear; `"two words"` for a phrase) |
+| ↑ ↓ / Ctrl-P Ctrl-N, PgUp PgDn, wheel | move through results |
+| Enter, or click the selected result | resume it |
+| Shift-↑ ↓, Shift-PgUp PgDn, wheel over the preview | scroll the preview |
+| Tab / Shift-Tab | next / previous matching message in the preview |
+| Ctrl-S | best match ⇄ newest first |
+| Ctrl-T | cycle agent: all, claude, codex, agy, kimi |
+| Ctrl-O | only sessions under the current directory (or `-p`) |
+| Ctrl-R | cycle who said it: anyone, user, assistant |
+| Esc / Ctrl-C | quit |
+
+Readline editing works in the query: Ctrl-A/E/B/F/U/K/W, Alt-Backspace.
 
 ## Index and daemon
 
@@ -103,7 +114,7 @@ HTTP API (`http://127.0.0.1:8095`, override clients with `AI_SESSION_INDEX_URL`)
 |---|---|
 | `GET /health` | liveness |
 | `GET /status?source=` | sessions / messages per agent, indexer state |
-| `GET /search?q=&source=&project=&cwd=&role=&limit=200` | one hit per session, newest first |
+| `GET /search?q=&source=&project=&cwd=&role=&limit=200&sort=recent` | one hit per session; `sort=relevance` for best match first (with `score`) |
 | `GET /sessions?source=&project=&cwd=&limit=30&offset=0` | latest sessions |
 | `GET /projects?source=` | projects with session counts |
 | `GET /session?source=&id=&project=` | full transcript, read fresh from disk |

@@ -1,7 +1,7 @@
 // claude-search: find a past agent session by what was said in it, and resume it.
 //
 // 対話モード: 絞り込み条件を決め、インデックスを最新にして（デーモンがいればその HTTP 経由、
-// いなければ手元の DB を直接）、fzf で検索しながら選ばせ、選んだセッションをそのエージェントで再開する。
+// いなければ手元の DB を直接）、ピッカーで検索しながら選ばせ、選んだセッションをそのエージェントで再開する。
 
 import { spawnSync } from "child_process";
 import { existsSync, realpathSync, unlinkSync } from "fs";
@@ -10,16 +10,15 @@ import { join, resolve } from "path";
 import { parseArgs } from "util";
 import { dedupe, defaultDbPath, defaultRoots, openForWriting, updateIndex, type SourceName } from "../session-index";
 import { DEFAULT_PORT, openIndex, type IndexAccess } from "../session-index/access";
-import type { Filter } from "../session-index/query";
+import { SORT_ORDERS, type Filter, type SortOrder } from "../session-index/query";
 import { serve } from "../session-index/server";
+import { pickSession, type Picked } from "../tui/picker";
 import { ensureConfig, execTemplateFor, setup, type Config } from "./config";
-import { ensureFzf, pickSession } from "./fzf";
 import { installDaemon, uninstallDaemon } from "./launchd";
-import { renderPreview, searchLine, sessionLine, type PickedLine } from "./render";
 import { selfCommand } from "./self";
 import { selfUpdate } from "./self-update";
 
-const VERSION = "1.0.0";
+const VERSION = "1.1.0";
 const SOURCES: readonly SourceName[] = ["claude", "codex", "agy", "kimi"];
 
 const HELP = `Usage: claude-search [query] [options]
@@ -27,6 +26,7 @@ const HELP = `Usage: claude-search [query] [options]
 
 Search Claude Code, Codex, Antigravity and Kimi Code sessions and resume one.
 Words are ANDed substrings (Japanese works); "quote" a phrase.
+Results come best match first; Ctrl-S in the picker switches to newest first.
 
 Options:
   -p, --project <path>   Only sessions under this directory (or whose project contains this text)
@@ -40,7 +40,8 @@ Options:
   -h, --help             Show this help
 
 Commands:
-  search <query> [--json] [--limit N]   Print matches (one per session)
+  search <query> [--json] [--limit N] [--sort recent|relevance]
+                                        Print matches, one per session (default: recent)
   status [--json]                       Index size per agent
   index [--budget SEC] [--json]         Bring the index up to date once
   dedupe                                Remove duplicated message rows
@@ -57,6 +58,7 @@ const { values, positionals } = parseArgs({
     role: { type: "string", short: "r" },
     source: { type: "string", short: "s" },
     exec: { type: "string", short: "e" },
+    sort: { type: "string" },
     "list-projects": { type: "boolean" },
     setup: { type: "boolean" },
     "clear-cache": { type: "boolean" },
@@ -69,12 +71,10 @@ const { values, positionals } = parseArgs({
     host: { type: "string" },
     port: { type: "string" },
     interval: { type: "string" },
-    // hidden: what fzf passes back to __lines / __preview
+    // hidden: exact filters, for scripts (kitty passes --cwd)
     query: { type: "string" },
     cwd: { type: "string" },
     "project-name": { type: "string" },
-    id: { type: "string" },
-    ts: { type: "string" },
   },
   allowPositionals: true,
   strict: false,
@@ -95,6 +95,12 @@ function fail(msg: string): never {
   process.exit(1);
 }
 
+function sortOption(): SortOrder {
+  const sort = str("sort") || "recent";
+  if (!SORT_ORDERS.includes(sort as SortOrder)) fail(`--sort must be one of ${SORT_ORDERS.join(", ")}`);
+  return sort as SortOrder;
+}
+
 // MARK: filters
 
 /** Search filters from the command line. Hidden commands get them already resolved. */
@@ -113,9 +119,6 @@ function projectFilter(p: string): Filter {
   return existsSync(path) ? { cwd: realpathSync(path) } : { project: p };
 }
 
-/** The same filters as flags for the hidden commands fzf runs. */
-const forwardFlags = (f: Filter) => ({ source: f.source, role: f.role, cwd: f.cwd, "project-name": f.project });
-
 // MARK: commands
 
 async function withIndex<T>(refresh: boolean, use: (index: IndexAccess) => Promise<T>): Promise<T> {
@@ -130,46 +133,25 @@ async function withIndex<T>(refresh: boolean, use: (index: IndexAccess) => Promi
   }
 }
 
-const LIST_LIMIT = 300;
-
-/** fzf reload: the matches for the query, or the latest sessions when it is empty. */
-async function printLines(filter: Filter, query: string) {
-  try {
-    await withIndex(false, async (index) => {
-      const lines = query.trim()
-        ? (await index.search(query, { ...filter, limit: LIST_LIMIT })).map(searchLine)
-        : (await index.sessions({ ...filter, limit: LIST_LIMIT })).map(sessionLine);
-      if (lines.length) process.stdout.write(lines.join("\n") + "\n");
-    });
-  } catch (e) {
-    // fzf shows stdout only; an error has to be a line to be seen at all.
-    console.log(`\x1b[31merror\x1b[0m\t${String(e instanceof Error ? e.message : e).replace(/\s+/g, " ")}`);
-  }
-}
-
-async function printPreview(config: Config) {
-  const source = str("source") as SourceName;
-  await withIndex(false, async (index) => {
-    const detail = await index.session({ source, id: str("id"), project: str("project-name") });
-    if (!detail) return console.log("Session file not found.");
-    const resume = execTemplateFor(config, source).replace(/\{sessionId\}/g, detail.id);
-    console.log(renderPreview(detail, resume, { ts: str("ts"), query: str("query") }));
-  });
-}
-
 async function interactive(query: string, filter: Filter) {
-  const [config, fzf] = await Promise.all([ensureConfig(), ensureFzf()]);
-  await withIndex(true, async (index) => {
+  const config = await ensureConfig();
+  const picked = await withIndex(true, async (index) => {
     const st = await index.status(filter.source);
     process.stderr.write(`\r${st.messages} messages in ${st.sessions} sessions (${index.via})\x1b[K\n`);
+    return pickSession({
+      index,
+      query,
+      filter,
+      here: realpathSync(process.cwd()),
+      resumeCommand: (source, id) => execTemplateFor(config, source as SourceName).replace(/\{sessionId\}/g, id),
+    });
   });
-  const picked = pickSession(fzf, { query, flags: forwardFlags(filter) });
   if (picked) resume(picked, config);
 }
 
-function resume(picked: PickedLine, config: Config) {
+function resume(picked: Picked, config: Config) {
   if (picked.cwd && existsSync(picked.cwd)) process.chdir(picked.cwd);
-  const cmd = (str("exec") || execTemplateFor(config, picked.source))
+  const cmd = (str("exec") || execTemplateFor(config, picked.source as SourceName))
     .replace(/\{sessionId\}/g, picked.session)
     .replace(/\{cwd\}/g, picked.cwd || process.cwd())
     .replace(/\{project\}/g, picked.cwd || "");
@@ -215,7 +197,7 @@ async function printStatus(filter: Filter) {
 
 async function printSearch(query: string, filter: Filter) {
   await withIndex(false, async (index) => {
-    const results = await index.search(query, { ...filter, limit: intOption("limit", 20) });
+    const results = await index.search(query, { ...filter, limit: intOption("limit", 20), sort: sortOption() });
     if (values.json) return console.log(JSON.stringify(results));
     for (const r of results) {
       console.log(`${r.source.padEnd(6)} ${r.session.slice(0, 8)} ${r.role.padEnd(9)} ${r.cwd}\n    ${r.snippet.replace(/[\x02\x03]/g, "")}`);
@@ -255,10 +237,6 @@ async function main() {
 
   const [command, ...rest] = positionals;
   switch (command) {
-    case "__lines":
-      return printLines(filter, str("query"));
-    case "__preview":
-      return printPreview(await ensureConfig());
     case "index":
       return indexOnce();
     case "status":

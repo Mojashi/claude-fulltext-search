@@ -6,13 +6,14 @@
 
 import type { Database } from "bun:sqlite";
 import { getSessionDetail, type SessionDetail } from "./detail";
-import { listProjects, listSessions, searchRich, status, type Filter, type IndexStatus, type ProjectSummary, type SearchResult, type SessionRow } from "./query";
+import { listProjects, listSessions, searchRich, status, type Filter, type IndexStatus, type ProjectSummary, type SearchResult, type SessionRow, type SortOrder } from "./query";
 import { defaultRoots, type SessionRoots } from "./sources";
 import { defaultDbPath, openForWriting } from "./store";
 import { updateIndex, type UpdateResult } from "./update";
 
 export interface SearchOptions extends Filter {
   limit?: number;
+  sort?: SortOrder;
 }
 
 export interface ListOptions extends Filter {

@@ -6,7 +6,7 @@
 
 import type { Database } from "bun:sqlite";
 import { getSessionDetail } from "./detail";
-import { findByPrefix, listProjects, listSessions, searchRich, status } from "./query";
+import { findByPrefix, listProjects, listSessions, searchRich, SORT_ORDERS, status, type SortOrder } from "./query";
 import type { SessionRoots } from "./sources";
 import { openForWriting } from "./store";
 
@@ -173,13 +173,16 @@ function route(req: Request, ctx: Ctx): Response {
         });
       case "/projects":
         return json({ projects: listProjects(ctx.db, p("source")) });
-      case "/search":
+      case "/search": {
+        const sort = p("sort") || "recent";
+        if (!SORT_ORDERS.includes(sort as SortOrder)) return json({ error: `sort must be one of ${SORT_ORDERS.join(", ")}` }, 400);
         return json({
           results: searchRich(ctx.db, p("q"), {
             source: p("source"), project: p("project"), cwd: p("cwd"), role: p("role"),
-            limit: intParam(qs, "limit", 200, 1, 500),
+            limit: intParam(qs, "limit", 200, 1, 500), sort: sort as SortOrder,
           }),
         });
+      }
       case "/session": {
         if (!p("id")) return json({ error: "missing id" }, 400);
         const detail = getSessionDetail(ctx.db, ctx.roots, { source: p("source"), id: p("id"), project: p("project") });
